@@ -36,74 +36,134 @@ Copy-Item -LiteralPath $src -Destination $appPath -Force
 Write-Output ("app       : " + $appPath)
 
 # ---------------------------------------------------------------- icon
-# Dark rounded tile, green play button - matches the launcher's own top-left mark.
-$N = 256
-$bmp = New-Object System.Drawing.Bitmap $N, $N, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-$g = [System.Drawing.Graphics]::FromImage($bmp)
-$g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-$g.Clear([System.Drawing.Color]::Transparent)
+<#
+  A dark rounded tile with a green play button, matching the launcher's own
+  top-left mark.
 
-function New-RoundedRect([int]$x, [int]$y, [int]$w, [int]$h, [int]$r) {
+  Two details that matter for how it actually looks:
+    * Every size from 16 to 256 is drawn at its own resolution rather than
+      downscaled from one big bitmap, so the taskbar and Alt-Tab versions stay
+      crisp instead of soft.
+    * Entries are uncompressed 32bpp DIBs. A PNG payload inside an ICO renders
+      fine in Explorer but System.Drawing.Icon cannot read it back, which breaks
+      any tooling that touches the file.
+#>
+function New-RoundedRect([double]$x, [double]$y, [double]$w, [double]$h, [double]$r) {
+    if ($r -lt 1) { $r = 1 }
     $p = New-Object System.Drawing.Drawing2D.GraphicsPath
-    $p.AddArc($x, $y, $r, $r, 180, 90)
-    $p.AddArc($x + $w - $r, $y, $r, $r, 270, 90)
-    $p.AddArc($x + $w - $r, $y + $h - $r, $r, $r, 0, 90)
-    $p.AddArc($x, $y + $h - $r, $r, $r, 90, 90)
+    $p.AddArc([single]$x, [single]$y, [single]$r, [single]$r, 180, 90)
+    $p.AddArc([single]($x + $w - $r), [single]$y, [single]$r, [single]$r, 270, 90)
+    $p.AddArc([single]($x + $w - $r), [single]($y + $h - $r), [single]$r, [single]$r, 0, 90)
+    $p.AddArc([single]$x, [single]($y + $h - $r), [single]$r, [single]$r, 90, 90)
     $p.CloseFigure()
     return $p
 }
 
-$outer = New-RoundedRect 8 8 240 240 46
-$g.FillPath((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 0x1F, 0x1F, 0x1F))), $outer)
+function New-LauncherIconPixels {
+    param([int]$Size)
 
-$inner = New-RoundedRect 44 44 168 168 30
-$g.FillPath((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 0x10, 0x7C, 0x10))), $inner)
+    # Draw on a 256-unit design grid and scale, so proportions hold at every size.
+    $k = $Size / 256.0
+    $bmp = New-Object System.Drawing.Bitmap $Size, $Size, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.Clear([System.Drawing.Color]::Transparent)
 
-# play triangle, nudged right so it looks optically centred
-$tri = New-Object System.Drawing.Drawing2D.GraphicsPath
-$tri.AddPolygon(@(
-        (New-Object System.Drawing.Point 112, 88),
-        (New-Object System.Drawing.Point 112, 168),
-        (New-Object System.Drawing.Point 176, 128)
-    ))
-$g.FillPath((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::White)), $tri)
-$g.Dispose()
+    # outer tile: faint vertical gradient plus a light rim for definition on dark desktops
+    $tileRect = New-Object System.Drawing.Rectangle 0, 0, $Size, $Size
+    $tile = New-RoundedRect (8 * $k) (8 * $k) (240 * $k) (240 * $k) (52 * $k)
+    $tileBrush = New-Object System.Drawing.Drawing2D.LinearGradientBrush $tileRect,
+    ([System.Drawing.Color]::FromArgb(255, 0x2A, 0x2A, 0x2A)),
+    ([System.Drawing.Color]::FromArgb(255, 0x12, 0x12, 0x12)), 90.0
+    $g.FillPath($tileBrush, $tile)
+    if ($Size -ge 32) {
+        $rim = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(70, 0xFF, 0xFF, 0xFF), [single](2.4 * $k))
+        $g.DrawPath($rim, $tile)
+    }
 
-$lockRect = New-Object System.Drawing.Rectangle 0, 0, $N, $N
-$data = $bmp.LockBits($lockRect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly,
-    [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-$stride = $data.Stride
-$pixels = New-Object byte[] ($stride * $N)
-[System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $pixels, 0, $pixels.Length)
-$bmp.UnlockBits($data)
-$bmp.Dispose()
+    # green button: lit at the top-left, deeper at the bottom
+    $btnRect = New-Object System.Drawing.Rectangle 0, 0, $Size, $Size
+    $btn = New-RoundedRect (46 * $k) (46 * $k) (164 * $k) (164 * $k) (36 * $k)
+    $btnBrush = New-Object System.Drawing.Drawing2D.LinearGradientBrush $btnRect,
+    ([System.Drawing.Color]::FromArgb(255, 0x22, 0xC5, 0x22)),
+    ([System.Drawing.Color]::FromArgb(255, 0x0A, 0x5A, 0x0A)), 60.0
+    $g.FillPath($btnBrush, $btn)
 
-# A hand-built 32bpp DIB entry. Hand-rolling a PNG entry inside an ICO renders in
-# Explorer but System.Drawing.Icon cannot read it back, which breaks tooling.
-$xorSize = $N * $N * 4
-$andStride = [int]([math]::Ceiling($N / 32.0) * 4)
-$andSize = $andStride * $N
-$imgSize = 40 + $xorSize + $andSize
+    # play triangle: optically centred by shifting right by ~6% of the button
+    $cx = 128.0
+    $cy = 128.0
+    $half = 42.0
+    $shift = 7.0
+    $tri = New-Object System.Drawing.Drawing2D.GraphicsPath
+    # ::new rather than New-Object Type(a), (b): a comma there is parsed as an
+    # argument separator for New-Object, not as a two-argument constructor call.
+    $tri.AddPolygon([System.Drawing.PointF[]]@(
+            [System.Drawing.PointF]::new([single](($cx - $half + $shift) * $k), [single](($cy - $half) * $k)),
+            [System.Drawing.PointF]::new([single](($cx - $half + $shift) * $k), [single](($cy + $half) * $k)),
+            [System.Drawing.PointF]::new([single](($cx + $half + $shift) * $k), [single]($cy * $k))
+        ))
+    if ($Size -ge 48) {
+        $shadow = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(60, 0x00, 0x00, 0x00))
+        $shifted = $tri.Clone()
+        $shifted.Transform((New-Object System.Drawing.Drawing2D.Matrix(1, 0, 0, 1, [single](1.5 * $k), [single](1.5 * $k))))
+        $g.FillPath($shadow, $shifted)
+    }
+    $g.FillPath((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::White)), $tri)
+    $g.Dispose()
+
+    $rect = New-Object System.Drawing.Rectangle 0, 0, $Size, $Size
+    $data = $bmp.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly,
+        [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $stride = $data.Stride
+    $bytes = New-Object byte[] ($stride * $Size)
+    [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $bytes, 0, $bytes.Length)
+    $bmp.UnlockBits($data)
+    $bmp.Dispose()
+
+    return [pscustomobject]@{ Size = $Size; Stride = $stride; Pixels = $bytes }
+}
 
 $icoPath = Join-Path $uiDir 'icon.ico'
+$frames = @()
+foreach ($size in @(16, 24, 32, 48, 64, 128, 256)) {
+    $frames += New-LauncherIconPixels -Size $size
+}
+
 $ms = New-Object System.IO.MemoryStream
 $bw = New-Object System.IO.BinaryWriter($ms)
-$bw.Write([uint16]0); $bw.Write([uint16]1); $bw.Write([uint16]1)
-$bw.Write([byte]0); $bw.Write([byte]0); $bw.Write([byte]0); $bw.Write([byte]0)
-$bw.Write([uint16]1); $bw.Write([uint16]32)
-$bw.Write([uint32]$imgSize); $bw.Write([uint32]22)
-$bw.Write([uint32]40)
-$bw.Write([int32]$N)
-$bw.Write([int32]($N * 2))
-$bw.Write([uint16]1); $bw.Write([uint16]32)
-$bw.Write([uint32]0); $bw.Write([uint32]$xorSize)
-$bw.Write([int32]0); $bw.Write([int32]0); $bw.Write([uint32]0); $bw.Write([uint32]0)
-for ($y = $N - 1; $y -ge 0; $y--) { $bw.Write($pixels, $y * $stride, $N * 4) }
-$bw.Write((New-Object byte[] $andSize))
+$bw.Write([uint16]0); $bw.Write([uint16]1); $bw.Write([uint16]$frames.Count)
+
+$offset = 6 + (16 * $frames.Count)
+foreach ($f in $frames) {
+    $xorSize = $f.Size * $f.Size * 4
+    $andStride = [int]([math]::Ceiling($f.Size / 32.0) * 4)
+    $andSize = $andStride * $f.Size
+    $imgSize = 40 + $xorSize + $andSize
+    # 0 means 256 in the ICONDIRENTRY width/height bytes
+    if ($f.Size -ge 256) { $bw.Write([byte]0); $bw.Write([byte]0) }
+    else { $bw.Write([byte]$f.Size); $bw.Write([byte]$f.Size) }
+    $bw.Write([byte]0); $bw.Write([byte]0)
+    $bw.Write([uint16]1); $bw.Write([uint16]32)
+    $bw.Write([uint32]$imgSize); $bw.Write([uint32]$offset)
+    $offset += $imgSize
+}
+foreach ($f in $frames) {
+    $xorSize = $f.Size * $f.Size * 4
+    $andStride = [int]([math]::Ceiling($f.Size / 32.0) * 4)
+    $andSize = $andStride * $f.Size
+    $bw.Write([uint32]40)
+    $bw.Write([int32]$f.Size)
+    $bw.Write([int32]($f.Size * 2))
+    $bw.Write([uint16]1); $bw.Write([uint16]32)
+    $bw.Write([uint32]0); $bw.Write([uint32]$xorSize)
+    $bw.Write([int32]0); $bw.Write([int32]0); $bw.Write([uint32]0); $bw.Write([uint32]0)
+    for ($y = $f.Size - 1; $y -ge 0; $y--) { $bw.Write($f.Pixels, $y * $f.Stride, $f.Size * 4) }
+    $bw.Write((New-Object byte[] $andSize))
+}
 $bw.Flush()
 [System.IO.File]::WriteAllBytes($icoPath, $ms.ToArray())
 $bw.Close(); $ms.Dispose()
-Write-Output ("icon      : " + $icoPath)
+Write-Output ("icon      : {0}  ({1} sizes, {2:N0} KB)" -f $icoPath, $frames.Count, ((Get-Item -LiteralPath $icoPath).Length / 1KB))
 
 # ---------------------------------------------------------------- no-console entry point
 $vbs = @"

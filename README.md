@@ -33,7 +33,7 @@ H:\Games\                     <- 0 bytes, nothing moved
 | | What it does |
 |---|---|
 | **GameShelf** (this folder) | Builds and maintains the shelf — a categorised tree of junctions. CLI. |
-| **[GameShelf Launcher](launcher/)** | An Xbox-style window onto that shelf: hero banner, category rails, one click to play. |
+| **[GameShelf Launcher](launcher/)** | An Xbox-style window onto that shelf: hero banner, tiled categories, one click to play. |
 
 ```
 launcher\install.ps1 -ShelfPath H:\Games
@@ -251,7 +251,7 @@ GameShelf 给你合并后的视图，但不搬文件。它用 **NTFS 目录联�
 | | 作用 |
 |---|---|
 | **GameShelf**（本目录） | 建立和维护文件架本身——一棵分类联接目录树，命令行工具 |
-| **[GameShelf Launcher](launcher/)** | 仿 Xbox 的图形界面：主推位、分类滑轨、最近游玩，双击即启动 |
+| **[GameShelf Launcher](launcher/)** | 仿 Xbox 的图形界面：主推位、平铺分类、最近游玩，双击即启动 |
 
 ```
 launcher\install.ps1 -ShelfPath H:\Games

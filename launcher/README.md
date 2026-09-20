@@ -1,8 +1,8 @@
 # GameShelf Launcher
 
 An Xbox-style front end for a GameShelf. Turns the shelf's plain folder tree into
-a browsable game library: hero banner, category rails, focus states, one click to
-play.
+a browsable game library: hero banner, tiled category sections, focus states, one
+click to play.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -18,10 +18,13 @@ play.
 │ 射击 │  └─────────────────────────────────────────────────────┘  │
 │ ...  │                                                          │
 │      │  动作冒险                                        7 款      │
-│      │  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐            │
-│      │  │  RDR │ │  HK  │ │  SF  │ │  SN  │ │ ...  │  →         │
-│      │  └──────┘ └──────┘ └──────┘ └──────┘ └──────┘            │
-│      │  Red Dead  Hollow   Split    Subnau                       │
+│      │  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐   │
+│      │  │  RDR │ │  HK  │ │  SF  │ │  SN  │ │  SR  │ │  CB  │   │
+│      │  └──────┘ └──────┘ └──────┘ └──────┘ └──────┘ └──────┘   │
+│      │  Red Dead  Hollow   Split    Subnau   Subnau2  Cyber    │
+│      │  ┌──────┐                                                │
+│      │  │  ER  │   ← wraps to the next row, no sideways drag   │
+│      │  └──────┘                                                │
 │      │                                                          │
 │      │  角色扮演                                        6 款      │
 │      │  ┌──────┐ ┌──────┐ ...                                  │
@@ -57,13 +60,20 @@ shelf by walking up from its own folder.
 | Type in the search box | Filters every entry by name, original name and category |
 | Click a nav rail entry | Shows just that category |
 | Right-click a tile | Open folder · copy real path · **set launcher** · switch to open-folder |
+| Click the shortcut while it is open | Restores and focuses the existing window instead of opening a second one |
 
 Games are started through the **shelf path**, never the recorded target, so an
 entry whose real folder sits on a non-ASCII path still launches from an
 all-ASCII one.
 
 Launching a game records it in `<shelf>\_ui\_recent.txt`, which drives the hero
-banner and the **最近游玩** rail.
+banner and the **最近游玩** section.
+
+Only one window runs per shelf. A named mutex keyed on the shelf path decides who
+owns it; the owner writes its pid to `_ui\_instance.pid`, and a second launch
+reads that, calls `ShowWindow(SW_RESTORE)` plus `SetForegroundWindow` on the
+running window and exits. A stale pid file — from a run that was killed rather
+than closed — is harmless: no window answers, so the new process takes over.
 
 ## Why `_launch.txt` exists
 
@@ -94,19 +104,35 @@ to this file.
 
 ## Design notes
 
-The layout follows the Xbox app: a thin left nav rail, a hero banner, then one
-horizontally scrolling rail per category. Tiles are square with the title and the
+The layout follows the Xbox app: a thin left nav rail, a hero banner, then a
+tiled section per category. Tiles are square with the title and the
 original-language name underneath, and the focus state is a white outline plus a
 small lift, which is what makes a console library feel navigable rather than
 dense.
 
+Sections are `WrapPanel`s inside the one vertically scrolling surface, so a
+library is browsed by scrolling down and nothing needs sideways dragging. On a
+1440-wide window that settles at seven tiles per row; a 25-game category becomes
+four rows.
+
 Everything is drawn from the shelf's own data — there is no cover art to fetch.
 Each tile gets a stable gradient derived from an FNV-1a hash of the entry name,
-with the game's real icon read from its executable, so a library of 62 unfamiliar
-names still reads as 62 distinct things.
+with the game's real icon read from its executable, so a library of 60-odd
+unfamiliar names still reads as 60-odd distinct things.
 
 `-Sakura` overlays drifting petals if you want the pastel look; the default is
 monochrome.
+
+`-Diag` builds the window, writes the measured grid geometry to
+`<shelf>\_ui\_layout.log` and exits without showing anything — useful for checking
+a layout change on a machine you cannot see:
+
+```
+window            : 1,440 x 900
+scroll viewport   : 1,337 wide
+horizontal scroll : Collapsed
+  grid: 25 tiles   7 columns   4 rows   panel 1,301 x 844
+```
 
 ## One Windows gotcha worth recording
 

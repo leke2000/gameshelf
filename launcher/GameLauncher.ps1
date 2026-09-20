@@ -31,7 +31,8 @@
 param(
     [string]$ShelfPath,
     [switch]$NoUI,
-    [switch]$Sakura
+    [switch]$Sakura,
+    [switch]$Diag
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,6 +45,74 @@ if (-not (Test-Path -LiteralPath $manifest)) {
 
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+
+Add-Type -Namespace GameShelf -Name Native -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool SetForegroundWindow(System.IntPtr hWnd);
+'@
+
+#region single instance
+
+# One window per shelf. Clicking the shortcut again should bring the running
+# library forward, not open a second copy of it.
+$script:InstancePidFile = Join-Path $PSScriptRoot '_instance.pid'
+
+function Get-ShelfMutexName {
+    param([string]$Path)
+    $h = [long]2166136261
+    foreach ($b in [System.Text.Encoding]::Unicode.GetBytes($Path.ToLowerInvariant())) {
+        $h = $h -bxor $b
+        $h = ($h * 16777619) % 4294967296
+    }
+    return 'Local\GameShelfLauncher_' + [int]($h % 2147483647)
+}
+
+function Focus-RunningInstance {
+    <#
+      Returns $true when an existing launcher was found and brought forward, in
+      which case this process should quit instead of opening a second window.
+    #>
+    if (-not (Test-Path -LiteralPath $script:InstancePidFile)) { return $false }
+    $raw = ''
+    try { $raw = ([System.IO.File]::ReadAllText($script:InstancePidFile)).Trim() } catch { return $false }
+    $other = 0
+    if (-not [int]::TryParse($raw, [ref]$other) -or $other -le 0) { return $false }
+    if ($other -eq $PID) { return $false }
+    try {
+        $proc = [System.Diagnostics.Process]::GetProcessById($other)
+        $proc.Refresh()
+        $h = $proc.MainWindowHandle
+        if ($h -eq [IntPtr]::Zero) { return $false }
+        [GameShelf.Native]::ShowWindow($h, 9) | Out-Null      # SW_RESTORE
+        [GameShelf.Native]::SetForegroundWindow($h) | Out-Null
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+if (-not $NoUI -and -not $Diag) {
+    $script:instanceMutex = New-Object System.Threading.Mutex($true, (Get-ShelfMutexName -Path $ShelfPath), [ref]$false)
+    $isFirst = $false
+    try { $isFirst = $script:instanceMutex.WaitOne(0, $false) } catch { $isFirst = $true }
+
+    if (-not $isFirst) {
+        if (Focus-RunningInstance) {
+            Write-Host '  Already running - brought the existing window forward.' -ForegroundColor DarkGray
+            exit 0
+        }
+        # The mutex is held but no window answered: a previous run died badly.
+        # Take ownership and carry on rather than leaving the user with nothing.
+        try { $isFirst = $script:instanceMutex.WaitOne(2000, $false) } catch { }
+        if (-not $isFirst) { exit 0 }
+    }
+
+    try { [System.IO.File]::WriteAllText($script:InstancePidFile, [string]$PID) } catch { }
+}
+
+#endregion single instance
 
 #region data
 
@@ -532,7 +601,7 @@ function New-Tile {
 
     $wrap = New-Object System.Windows.Controls.StackPanel
     $wrap.Width = $Size
-    $wrap.Margin = New-Object System.Windows.Thickness(0, 0, 12, 0)
+    $wrap.Margin = New-Object System.Windows.Thickness(0, 0, 12, 14)
 
     $tile = New-Object System.Windows.Controls.Border
     $tile.Width = $Size
@@ -729,17 +798,18 @@ function New-Heading {
     return $grid
 }
 
-function New-Rail {
+function New-TileGrid {
+    <#
+      Tiles flow into rows and wrap. A WrapPanel inside a vertically scrolling
+      ScrollViewer with horizontal scrolling disabled takes the viewport width, so
+      everything is reachable by scrolling down - no sideways dragging.
+    #>
     param([object[]]$Items, [int]$TileSize = 158)
-    $sv = New-Object System.Windows.Controls.ScrollViewer
-    $sv.HorizontalScrollBarVisibility = 'Auto'
-    $sv.VerticalScrollBarVisibility = 'Disabled'
-    $sv.Padding = New-Object System.Windows.Thickness(24, 0, 24, 4)
-    $panel = New-Object System.Windows.Controls.StackPanel
+    $panel = New-Object System.Windows.Controls.WrapPanel
     $panel.Orientation = 'Horizontal'
+    $panel.Margin = New-Object System.Windows.Thickness(24, 0, 12, 0)
     foreach ($e in $Items) { $panel.Children.Add((New-Tile -Entry $e -Size $TileSize)) | Out-Null }
-    $sv.Content = $panel
-    return $sv
+    return $panel
 }
 
 function New-Hero {
@@ -935,7 +1005,7 @@ function Rebuild-Content {
             })
         $contentHost.Children.Add((New-Heading -Text '搜索结果' -Right ("$($hits.Count) 个结果"))) | Out-Null
         if ($hits.Count -gt 0) {
-            $contentHost.Children.Add((New-Rail -Items $hits)) | Out-Null
+            $contentHost.Children.Add((New-TileGrid -Items $hits)) | Out-Null
         } else {
             $none = New-Object System.Windows.Controls.TextBlock
             $none.Text = '没有匹配的游戏'
@@ -951,7 +1021,7 @@ function Rebuild-Content {
     if ($script:activeCat) {
         $items = @($entries | Where-Object { $_.Category -eq $script:activeCat })
         $contentHost.Children.Add((New-Heading -Text ($script:activeCat -replace '^\d+_', '') -Right ("$($items.Count) 款"))) | Out-Null
-        $contentHost.Children.Add((New-Rail -Items $items)) | Out-Null
+        $contentHost.Children.Add((New-TileGrid -Items $items)) | Out-Null
         Update-Status
         return
     }
@@ -970,13 +1040,13 @@ function Rebuild-Content {
 
     if ($recent.Count -gt 1) {
         $contentHost.Children.Add((New-Heading -Text '最近游玩')) | Out-Null
-        $contentHost.Children.Add((New-Rail -Items $recent)) | Out-Null
+        $contentHost.Children.Add((New-TileGrid -Items $recent)) | Out-Null
     }
 
     foreach ($g in ($entries | Group-Object Category | Sort-Object Name)) {
         $label = $g.Name -replace '^\d+_', ''
         $contentHost.Children.Add((New-Heading -Text $label -Right ("$($g.Count) 款"))) | Out-Null
-        $contentHost.Children.Add((New-Rail -Items @($g.Group | Sort-Object Name))) | Out-Null
+        $contentHost.Children.Add((New-TileGrid -Items @($g.Group | Sort-Object Name))) | Out-Null
     }
     Update-Status
 }
@@ -1007,15 +1077,9 @@ Rebuild-Content
   A launcher started by launch.vbs goes through WScript.Shell.Run(..., 0, ...),
   which hands SW_HIDE to the process as its startup show-state. WPF's first
   top-level window inherits it and ends up minimized off-screen. Force it back to
-  a normal foreground window as soon as the handle exists.
+  a normal foreground window as soon as the handle exists. (GameShelf.Native is
+  declared once, near the top of this script.)
 #>
-Add-Type -Namespace GameShelf -Name Native -MemberDefinition @'
-[System.Runtime.InteropServices.DllImport("user32.dll")]
-public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
-[System.Runtime.InteropServices.DllImport("user32.dll")]
-public static extern bool SetForegroundWindow(System.IntPtr hWnd);
-'@
-
 function Show-LauncherWindow {
     try {
         $helper = New-Object System.Windows.Interop.WindowInteropHelper($window)
@@ -1029,6 +1093,37 @@ function Show-LauncherWindow {
 
 $window.Add_SourceInitialized({ Show-LauncherWindow })
 $window.Add_Loaded({ Show-LauncherWindow })
+
+if ($Diag) {
+    <#
+      Headless layout check: measure the built grids, write the geometry to a log
+      and close. Confirms the tiles actually wrap into rows instead of forming one
+      long horizontal strip, which is the whole point of the tiled layout.
+    #>
+    $window.Add_ContentRendered({
+            $log = Join-Path (Join-Path $ShelfPath '_ui') '_layout.log'
+            $lines = New-Object System.Collections.Generic.List[string]
+            $lines.Add(('window            : {0:N0} x {1:N0}' -f $window.ActualWidth, $window.ActualHeight))
+            $lines.Add(('scroll viewport   : {0:N0} wide' -f $scroller.ViewportWidth))
+            $lines.Add(('horizontal scroll : {0}' -f $scroller.ComputedHorizontalScrollBarVisibility))
+            $lines.Add(('top-level blocks  : {0}' -f $contentHost.Children.Count))
+            foreach ($child in $contentHost.Children) {
+                if ($child -is [System.Windows.Controls.WrapPanel]) {
+                    $rows = @{}
+                    $cols = @{}
+                    foreach ($k in $child.Children) {
+                        $pt = $k.TranslatePoint((New-Object System.Windows.Point(0, 0)), $child)
+                        $rows[[int][math]::Round($pt.Y)] = $true
+                        $cols[[int][math]::Round($pt.X)] = $true
+                    }
+                    $lines.Add(('  grid: {0,2} tiles   {1} columns   {2} rows   panel {3:N0} x {4:N0}' -f `
+                                $child.Children.Count, $cols.Count, $rows.Count, $child.ActualWidth, $child.ActualHeight))
+                }
+            }
+            [System.IO.File]::WriteAllLines($log, $lines, (New-Object System.Text.UTF8Encoding($false)))
+            $window.Close()
+        })
+}
 
 #endregion nav + composition
 
@@ -1091,7 +1186,21 @@ if ($Sakura) {
     $window.Add_Closed({ $petalTimer.Stop() })
 }
 
-$window.Add_Closed({ $toastTimer.Stop() })
+$window.Add_Closed({
+        $toastTimer.Stop()
+        if (-not $NoUI -and -not $Diag) {
+            # Tidy up the single-instance markers. A stale pid file is harmless
+            # (Focus-RunningInstance just fails to find a window), but leaving it
+            # around is untidy.
+            try {
+                if (Test-Path -LiteralPath $script:InstancePidFile) {
+                    $raw = ([System.IO.File]::ReadAllText($script:InstancePidFile)).Trim()
+                    if ($raw -eq [string]$PID) { Remove-Item -LiteralPath $script:InstancePidFile -Force }
+                }
+            } catch { }
+            try { if ($script:instanceMutex) { $script:instanceMutex.ReleaseMutex(); $script:instanceMutex.Dispose() } } catch { }
+        }
+    })
 $window.ShowDialog() | Out-Null
 
 #endregion chrome + optional petals

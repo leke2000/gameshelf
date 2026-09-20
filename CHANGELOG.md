@@ -4,6 +4,32 @@ All notable changes to GameShelf are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] - 2026-09-20
+
+### Changed
+
+- **Launcher layout is tiled instead of railed.** The per-category horizontally
+  scrolling rails were awkward to browse — every category needed sideways
+  dragging. Sections are now `WrapPanel`s inside the single vertical scroll, so a
+  library is browsed by scrolling down only. On a 1440-wide window that settles at
+  seven tiles per row; a 25-game category becomes four rows. Verified with
+  `-Diag`, which reports `horizontal scroll : Collapsed`.
+- **Icon is crisp at every size.** It now carries 16, 24, 32, 48, 64, 128 and 256
+  pixel frames, each drawn at its own resolution rather than downscaled from one
+  big bitmap, and uses gradients (tile, green button, rims) instead of flat fills.
+
+### Added
+
+- **Single instance per shelf.** Clicking the shortcut again restores and focuses
+  the running window instead of opening a second copy. A named mutex keyed on the
+  shelf path decides ownership, the owner records its pid in
+  `<shelf>\_ui\_instance.pid`, and a later launch forwards to it. A stale pid file
+  from a killed run is detected and taken over.
+- `-Diag` on the launcher: builds the window, writes the measured grid geometry
+  (columns, rows, panel size) to `<shelf>\_ui\_layout.log` and exits without
+  showing anything. Useful for checking a layout change on a machine you cannot
+  look at.
+
 ## [1.1.0] - 2026-09-20
 
 Adds a graphical front end. The CLI is unchanged.
@@ -11,9 +37,9 @@ Adds a graphical front end. The CLI is unchanged.
 ### Added
 
 - **`launcher/GameLauncher.ps1`** — an Xbox-style window onto a shelf: left nav
-  rail, hero banner for the most recently played game, one horizontally
-  scrolling rail per category, square tiles with white-outline focus states, and
-  a green play action.
+  rail, hero banner for the most recently played game, a tiled section per
+  category, square tiles with white-outline focus states, and a green play
+  action.
 - **`launcher/install.ps1`** — copies the launcher into `<shelf>\_ui\`, generates
   a matching icon, writes a no-console `.vbs` entry point and creates a Desktop
   shortcut.
@@ -24,7 +50,7 @@ Adds a graphical front end. The CLI is unchanged.
   player), so the curated map is the source of truth and the heuristic is only a
   fallback. Right-click a tile to correct one; it is written back.
 - **Recently played** tracking in `<shelf>\_ui\_recent.txt`, driving the hero
-  banner and a dedicated rail.
+  banner and a dedicated section.
 - `-Sakura` for drifting petals; the default look is monochrome.
 
 ### Fixed
