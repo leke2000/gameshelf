@@ -4,6 +4,39 @@ All notable changes to GameShelf are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-09-20
+
+Adds a graphical front end. The CLI is unchanged.
+
+### Added
+
+- **`launcher/GameLauncher.ps1`** — an Xbox-style window onto a shelf: left nav
+  rail, hero banner for the most recently played game, one horizontally
+  scrolling rail per category, square tiles with white-outline focus states, and
+  a green play action.
+- **`launcher/install.ps1`** — copies the launcher into `<shelf>\_ui\`, generates
+  a matching icon, writes a no-console `.vbs` entry point and creates a Desktop
+  shortcut.
+- **`_launch.txt`** — an explicit map from shelf entry to executable. Heuristic
+  detection picks the wrong file roughly half the time on a real library (the
+  largest executable in a Cyberpunk 2077 folder is a repack installer, the one in
+  Wizard of Legend 2 is a 3 GB self-extractor, Elden Ring ships an artbook
+  player), so the curated map is the source of truth and the heuristic is only a
+  fallback. Right-click a tile to correct one; it is written back.
+- **Recently played** tracking in `<shelf>\_ui\_recent.txt`, driving the hero
+  banner and a dedicated rail.
+- `-Sakura` for drifting petals; the default look is monochrome.
+
+### Fixed
+
+- A launcher started via `WScript.Shell.Run(..., 0, ...)` inherits `SW_HIDE` as
+  its startup show-state, so WPF's first window came up minimized at
+  `-16000,-16000` while reporting `IsWindowVisible = True`. The window is now
+  forced back with `ShowWindow(SW_RESTORE)` plus `SetForegroundWindow` once its
+  handle exists; setting `WindowState = 'Normal'` alone does not help.
+- Card subtitles rendered the rating tag for entries whose note begins with one,
+  so fifteen tiles read `18+` instead of the game's original name.
+
 ## [1.0.0] - 2026-09-20
 
 First release.

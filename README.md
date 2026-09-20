@@ -28,6 +28,19 @@ H:\Games\                     <- 0 bytes, nothing moved
 
 ---
 
+## Two parts
+
+| | What it does |
+|---|---|
+| **GameShelf** (this folder) | Builds and maintains the shelf — a categorised tree of junctions. CLI. |
+| **[GameShelf Launcher](launcher/)** | An Xbox-style window onto that shelf: hero banner, category rails, one click to play. |
+
+```
+launcher\install.ps1 -ShelfPath H:\Games
+```
+
+---
+
 ## Requirements
 
 - Windows (NTFS junctions are a Windows feature)
@@ -232,6 +245,17 @@ MIT. See [LICENSE](LICENSE).
 GameShelf 给你合并后的视图，但不搬文件。它用 **NTFS 目录联接（junction）**
 搭出一棵分类目录树，也支持真正搬移（`Move`）/ 复制（`Copy`）。联接对程序完全
 透明：游戏照常启动，存档照常工作，快捷方式原样有效，而整个「文件架」占用 0 字节。
+
+## 两个部分
+
+| | 作用 |
+|---|---|
+| **GameShelf**（本目录） | 建立和维护文件架本身——一棵分类联接目录树，命令行工具 |
+| **[GameShelf Launcher](launcher/)** | 仿 Xbox 的图形界面：主推位、分类滑轨、最近游玩，双击即启动 |
+
+```
+launcher\install.ps1 -ShelfPath H:\Games
+```
 
 ## 环境要求
 
