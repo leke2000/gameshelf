@@ -1,0 +1,17 @@
+# Shelf artefacts that appear at the repo root when you test locally
+_shelf.txt
+CATALOG.md
+index.csv
+
+# Draft manifests from scan
+draft.txt
+draft.csv
+report.csv
+
+# OS noise
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Logs
+*.log

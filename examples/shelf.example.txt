@@ -1,0 +1,30 @@
+# Example GameShelf manifest.
+#
+# Format:  category|name|target|note
+#   category  folder name the entry appears under on the shelf
+#   name      label shown on the shelf (need not match the folder on disk)
+#   target    the real install folder - this is what must never be moved
+#   note      free text, appears in CATALOG.md
+#
+# Lines starting with '#' and blank lines are ignored.
+# Save as UTF-8. A .csv with columns category,name,target,note works too.
+
+# --- hand-picked, clean names ---
+Action|Hollow Knight|G:\Hollow.Knight|includes save editor
+Action|Elden Ring|D:\SteamLibrary\steamapps\common\ELDEN RING|
+RPG|Cyberpunk 2077|H:\@game\Cyberpunk 2077|
+
+# The shelf label does not have to match the folder name, which is the whole
+# point when the real folder is a serial number or a string of mojibake.
+Visual Novel|千恋万花|H:\games\【PC硬盘】千恋万花（落樱×城彩学园汉化版本）|18+
+Visual Novel|Sabbat of the Witch|D:\MyGame\12666|original folder name was just a number
+
+# --- launcher-managed titles: only safe when the launcher is not involved ---
+Indie|Blazing Beaks|D:\MyGame\BlazingBeaks|
+Indie|Crypt of the NecroDancer|D:\MyGame\Crypt of the NecroDancer|
+
+# --- things that are technically games but worth flagging ---
+# A yuzu/emulator setup is a folder of emulator + ROM, not a native game.
+Emulator|Zelda BOTW (yuzu)|F:\Legend of Zelda-Breath of the Wild\yuzu-windows-msvc-early-access|
+# An unpacked installer is not a game yet; keep it visible so it does not get lost.
+Archive|God of War Ragnarok (split zip)|H:\game\安装包\God of War Ragnarok.zip|118 GB, not extracted yet

@@ -1,0 +1,18 @@
+# Windows PowerShell 5.1 reads BOM-less files using the system ANSI codepage,
+# which mangles non-ASCII string literals. GameShelf handles Japanese and Chinese
+# folder names, so its scripts must keep the BOM.
+[*.{ps1,psm1,psd1}]
+charset = utf-8-bom
+end_of_line = crlf
+indent_style = space
+indent_size = 4
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{md,yml,yaml,json}]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+insert_final_newline = true
+trim_trailing_whitespace = true
