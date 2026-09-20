@@ -35,6 +35,8 @@ H:\Games\                     <- 0 bytes, nothing moved
 | **GameShelf** (this folder) | Builds and maintains the shelf — a categorised tree of junctions. CLI. |
 | **[GameShelf Launcher](launcher/)** | An Xbox-style window onto that shelf: hero banner, tiled categories, one click to play. |
 
+The CLI also backs up and restores game saves — see [Save data](#save-data).
+
 ```
 launcher\install.ps1 -ShelfPath H:\Games
 ```
@@ -146,6 +148,53 @@ manifests keep their place, so you can add games a few at a time. Pass
 `remove` deletes **junctions only**. It refuses to touch a folder that is not a
 reparse point, and on a `Move`/`Copy` shelf it refuses entirely — those entries
 are real data and it will not pretend otherwise.
+
+## Save data
+
+A game's saves can be inside the game folder, under `%APPDATA%`, under
+`%LOCALAPPDATA%\..\LocalLow`, in `Documents\My Games`, in `Saved Games`, or in a
+Steam emulator's own store. Guessing which is unreliable, so the same rule as
+launch targets applies: a curated map is the source of truth and detection is a
+hint.
+
+```powershell
+.\gameshelf.ps1 saves   -Shelf H:\Games              # what is mapped, and candidates for the rest
+.\gameshelf.ps1 backup  -Shelf H:\Games -All         # copy saves into the store
+.\gameshelf.ps1 backup  -Shelf H:\Games -Name Elden Ring
+.\gameshelf.ps1 backups -Shelf H:\Games              # list what is stored
+.\gameshelf.ps1 restore -Shelf H:\Games -Name Elden Ring [-Backup <id>]
+```
+
+The map is `<shelf>\_saves.txt`:
+
+```
+# <shelf entry name>|<path>[;<path>...]
+Subnautica|GAME\SNAppData
+Cyberpunk 2077|%SAVEDGAMES%\CD Projekt Red\Cyberpunk 2077
+Elden Ring|%APPDATA%\EldenRing
+```
+
+Paths accept `%APPDATA%`, `%LOCALAPPDATA%`, `%USERPROFILE%`, `%DOCUMENTS%`,
+`%SAVEDGAMES%`, `%LOCALLOW%`, a `GAME\` prefix, or a bare relative path — the last
+two resolve against the game's own folder.
+
+Backups land in `<shelf>\_saves\<entry>\<timestamp>\` as `p0`, `p1`, … with a
+`_backup.txt` manifest recording what each one came from. `-Store` puts the store
+somewhere else, which matters when the shelf is on a small system drive: a full
+set runs to a couple of GB and `-Keep` (default 10) multiplies that.
+
+**Restoring is undoable.** The live saves are copied to a `_prerestore_*` folder
+first, so a mistaken restore can be walked back. Live paths are cleared before the
+copy, so the result reflects the backup rather than merging with it.
+
+### Detection, and why it is only a hint
+
+`saves` reports candidates for games that are not mapped yet. It looks for
+save-named folders inside the game, then probes the usual per-user locations using
+the executable's company and product metadata and its own file name (Unreal names
+its user folder after the project, which is the executable). On one real 63-game
+shelf that found something for 44 of them — useful, but it also produced misses
+and false positives, which is why the curated map exists.
 
 ## Manifest format
 
@@ -291,6 +340,46 @@ launcher\install.ps1 -ShelfPath H:\Games
 | `remove` | 取下条目（`-All` / `-Name` / `-Category`） |
 
 所有命令都支持 `-WhatIf` 和 `-Verbose`。
+
+## 存档备份
+
+游戏的存档可能在游戏自己目录里，也可能在 `%APPDATA%`、`%LOCALAPPDATA%\..\LocalLow`、
+`Documents\My Games`、`Saved Games`，或者某个 Steam 模拟器的目录里。猜不准，所以和启动
+目标一个原则：**以手工核对的映射表为准，自动识别只作提示**。
+
+```powershell
+.\gameshelf.ps1 saves   -Shelf H:\Games              # 看已映射的，以及未映射游戏的候选位置
+.\gameshelf.ps1 backup  -Shelf H:\Games -All         # 全量备份
+.\gameshelf.ps1 backup  -Shelf H:\Games -Name 艾尔登法环
+.\gameshelf.ps1 backups -Shelf H:\Games              # 列出已有备份
+.\gameshelf.ps1 restore -Shelf H:\Games -Name 艾尔登法环 [-Backup <id>]
+```
+
+映射表是 `<文件架>\_saves.txt`：
+
+```
+# <条目名>|<路径>[;<路径>...]
+Subnautica|GAME\SNAppData
+Cyberpunk 2077|%SAVEDGAMES%\CD Projekt Red\Cyberpunk 2077
+Elden Ring|%APPDATA%\EldenRing
+```
+
+路径支持 `%APPDATA%` `%LOCALAPPDATA%` `%USERPROFILE%` `%DOCUMENTS%` `%SAVEDGAMES%`
+`%LOCALLOW%` 这些记号，也支持 `GAME\` 前缀或直接写相对路径——后两者都相对游戏自己的目录。
+
+备份放在 `<文件架>\_saves\<游戏>\<时间戳>\`，内含 `p0`、`p1`… 和一份 `_backup.txt`
+清单（记录每个 pN 来自哪里）。`-Store` 可以把备份库放到别处——文件架在小容量系统盘上
+时这点很重要：全量备份约 2GB，`-Keep`（默认 10）再乘上去就顶爆了。
+
+**恢复是可回退的。** 恢复前会先把当前存档完整复制到 `_prerestore_*` 目录，所以恢复错了
+还能退回恢复前的状态。覆盖前会清空目标，保证结果是"备份的样子"而不是与现有内容混合。
+
+### 自动识别为什么只作提示
+
+`saves` 会给未映射的游戏列出候选位置：先找游戏目录里名字像存档的文件夹，再用 exe 的
+公司名/产品名和 exe 自身文件名去探测常见的用户目录（虚幻引擎的用户目录就是用项目名，
+也就是 exe 名）。在一份真实的 63 游戏文件架上，这样能对 44 个找到线索——有用，但既有漏
+也有误报，所以最终仍然依赖手工核对的映射表。
 
 ## 清单格式
 

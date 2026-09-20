@@ -4,6 +4,35 @@ All notable changes to GameShelf are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-09-20
+
+### Added
+
+- **Save-data backup and restore**, as CLI commands: `saves`, `backup`, `backups`,
+  `restore`. Sources come from a curated `<shelf>\_saves.txt` map (the same idea as
+  `_launch.txt`: guessing is unreliable), backups land in
+  `<shelf>\_saves\<entry>\<timestamp>\` with a manifest per set, and `-Store` can
+  move the store to a roomier drive.
+- `Find-GSSaveCandidate` suggests save locations for unmapped games by looking for
+  save-named folders inside the game and probing per-user locations using the
+  executable's company/product metadata and its own file name.
+- Restores are reversible: the live saves are written to a `_prerestore_*` folder
+  before being overwritten.
+- 15 tests covering map round-trips, token expansion, backup/list/prune, a byte-exact
+  restore with its safety copy, and candidate discovery.
+
+### Fixed
+
+- **`Get-GSShelf` and `Test-GSShelf` returned `List` values, which makes `@()` throw
+  "parameter type mismatch"** for callers even though `.Count` and `foreach` work.
+  Both now return plain arrays.
+- `Resolve-GSSavePath` left a bare relative path untouched, so it resolved against
+  the current directory instead of the game's folder.
+- Two variables in `gameshelf.ps1` shadowed its own parameters, because PowerShell
+  variable names are case-insensitive: a local `$all` assigned to the `-All` switch
+  (throwing "cannot convert to SwitchParameter") and a local `$name` assigned to
+  `-Name`. Renamed. Worth knowing if you write more commands into this script.
+
 ## [1.1.1] - 2026-09-20
 
 ### Changed

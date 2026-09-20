@@ -20,6 +20,10 @@ Set-StrictMode -Version Latest
 $script:GSFormatVersion = 1
 $script:GSManifestName = '_shelf.txt'
 
+# Save-data support lives in its own file to keep this one navigable. Dot-sourced
+# so its functions share this module's scope (and its StrictMode).
+. (Join-Path $PSScriptRoot 'GameShelf.Saves.ps1')
+
 #region ---------------------------------------------------------------- manifest
 
 function Import-GSManifest {
@@ -680,7 +684,10 @@ function Get-GSShelf {
     return [pscustomobject]@{
         Shelf = $Shelf
         Mode  = (Get-GSProp $meta 'mode')
-        Items = $rows
+        # A plain array, not a List: PowerShell's array subexpression operator
+        # throws "parameter type mismatch" on List values in this position, so
+        # @($shelf.Items) would fail for callers even though .Count and foreach work.
+        Items = $rows.ToArray()
     }
 }
 
@@ -722,7 +729,8 @@ function Test-GSShelf {
         Shelf  = $Shelf
         Total  = $report.Count
         Bad    = $bad.Count
-        Report = $report
+        # Plain array for the same reason as Get-GSShelf's Items.
+        Report = $report.ToArray()
     }
 }
 
@@ -960,10 +968,64 @@ function Test-GSIsElevated {
 
 #endregion ---------------------------------------------------------- environment
 
+#region ------------------------------------------------------------- launch map
+
+$script:GSLaunchMapName = '_launch.txt'
+
+function Import-GSLaunchMap {
+    <#
+    .SYNOPSIS
+        Read a shelf's launch map (_launch.txt): entry name -> exe path relative to
+        that entry's folder. 'FOLDER' means the entry has no executable.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory, Position = 0)][string]$Shelf)
+
+    $map = @{}
+    $path = Join-Path $Shelf $script:GSLaunchMapName
+    if (-not (Test-Path -LiteralPath $path)) { return $map }
+    foreach ($line in [System.IO.File]::ReadAllLines($path, [System.Text.Encoding]::UTF8)) {
+        $t = $line.Trim()
+        if ($t -eq '' -or $t.StartsWith('#')) { continue }
+        $i = $t.IndexOf('|')
+        if ($i -lt 1) { continue }
+        $map[$t.Substring(0, $i).Trim()] = $t.Substring($i + 1).Trim()
+    }
+    return $map
+}
+
+function Get-GSLaunchExe {
+    <#
+    .SYNOPSIS
+        The executable a shelf entry launches, or $null when unmapped or set to
+        FOLDER. Used by save discovery, which reads the executable's metadata.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Shelf,
+        [Parameter(Mandatory)][string]$EntryName,
+        [Parameter(Mandatory)][string]$Target
+    )
+    $map = Import-GSLaunchMap -Shelf $Shelf
+    if (-not $map.ContainsKey($EntryName)) { return $null }
+    $rel = $map[$EntryName]
+    if ($rel -eq 'FOLDER') { return $null }
+    $p = Join-Path $Target $rel
+    if (Test-Path -LiteralPath $p) { return $p }
+    return $null
+}
+
+#endregion ---------------------------------------------------------- launch map
+
 Export-ModuleMember -Function @(
     'Import-GSManifest', 'Export-GSManifest', 'Get-GSManifestMeta',
     'Test-GSLink', 'Get-GSLinkTarget', 'New-GSLink', 'Remove-GSLink',
     'Get-GSFolderSize', 'Get-GSGameSignal', 'Invoke-GSScan',
     'New-GSShelf', 'Get-GSShelf', 'Test-GSShelf', 'Export-GSIndex',
-    'Remove-GSShelf', 'Test-GSEnvironment', 'Test-GSIsElevated'
+    'Remove-GSShelf', 'Test-GSEnvironment', 'Test-GSIsElevated',
+    'Get-GSSaveMapPath', 'Import-GSSaveMap', 'Export-GSSaveMap',
+    'Resolve-GSSavePath', 'Get-GSSaveTarget', 'Get-GSFileStat',
+    'Find-GSSaveCandidate', 'Get-GSSaveStore',
+    'Backup-GSSave', 'Get-GSSaveBackup', 'Restore-GSSave',
+    'Import-GSLaunchMap', 'Get-GSLaunchExe'
 )

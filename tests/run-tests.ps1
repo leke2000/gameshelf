@@ -372,6 +372,153 @@ Test-Case 'list output shape is stable' {
     Assert-Equal 3 $cats.Count
 }
 
+# ---------------------------------------------------------------- saves
+
+Write-Host ''
+Write-Host 'save data' -ForegroundColor White
+
+$saveStore = Join-Path $sandbox 'savestore'
+
+Test-Case 'save map round-trips' {
+    $mf = Join-Path $shelf '_saves.txt'
+    Export-GSSaveMap -Shelf $shelf -Map @{
+        'Hollow Knight' = @('%APPDATA%\TeamCherry', 'GAME\profile')
+        'A1130'         = @('GAME\save')
+    }
+    Assert-True (Test-Path -LiteralPath $mf) 'map file must exist'
+    $back = Import-GSSaveMap -Shelf $shelf
+    Assert-Equal 2 $back.Keys.Count
+    Assert-Equal 2 @($back['Hollow Knight']).Count
+    Assert-Equal 'GAME\save' @($back['A1130'])[0]
+}
+
+Test-Case 'a missing save map is empty, not an error' {
+    $tmp = Join-Path $sandbox 'noshelf'
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $m = Import-GSSaveMap -Shelf $tmp
+    Assert-Equal 0 $m.Keys.Count
+}
+
+Test-Case 'GAME\ resolves against the game folder' {
+    $p = Resolve-GSSavePath -Raw 'GAME\profile' -Target 'D:\games\HK'
+    Assert-Equal 'D:\games\HK\profile' $p
+}
+
+Test-Case 'environment tokens expand without doubling backslashes' {
+    $p = Resolve-GSSavePath -Raw '%APPDATA%\Foo\Bar' -Target 'D:\games\X'
+    Assert-True ($p.StartsWith($env:APPDATA)) 'must start with APPDATA'
+    Assert-True ($p -notmatch '\\\\') "backslashes must not be doubled, got: $p"
+    Assert-True ($p.EndsWith('\Foo\Bar')) 'tail must survive'
+}
+
+Test-Case 'Get-GSSaveTarget reports existence' {
+    $dir = Join-Path $sandbox 'savesrc'
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $dir 'a.dat') -Value 'x'
+    $t = @(Get-GSSaveTarget -Target $sandbox -RawPaths @('savesrc', 'nope'))
+    Assert-Equal 2 $t.Count
+    Assert-True $t[0].Exists 'first must exist'
+    Assert-True (-not $t[1].Exists) 'second must not'
+    Assert-Equal 'Folder' $t[0].Kind
+    Assert-Equal 'Missing' $t[1].Kind
+}
+
+Test-Case 'Get-GSFileStat counts files and bytes' {
+    $s = Get-GSFileStat -Path (Join-Path $sandbox 'savesrc')
+    Assert-Equal 1 $s.Files
+    Assert-True ($s.Bytes -gt 0) 'bytes must be counted'
+}
+
+Test-Case 'backing up captures the saves and a manifest' {
+    $res = Backup-GSSave -EntryName 'SavedGame' -Target $sandbox -RawPaths @('savesrc') -Store $saveStore
+    Assert-True ($null -ne $res) 'must return a result'
+    Assert-Equal 1 $res.Files
+    Assert-True (Test-Path -LiteralPath (Join-Path $res.Backup 'p0\a.dat')) 'file must be copied'
+    Assert-True (Test-Path -LiteralPath (Join-Path $res.Backup '_backup.txt')) 'manifest must exist'
+}
+
+Test-Case 'backing up a game with no saves returns null' {
+    $res = Backup-GSSave -EntryName 'Nothing' -Target $sandbox -RawPaths @('does-not-exist') -Store $saveStore
+    Assert-True ($null -eq $res) 'must be null when nothing exists'
+}
+
+Test-Case 'backups list newest first' {
+    Start-Sleep -Seconds 1
+    Backup-GSSave -EntryName 'SavedGame' -Target $sandbox -RawPaths @('savesrc') -Store $saveStore | Out-Null
+    $all = @(Get-GSSaveBackup -EntryName 'SavedGame' -Store $saveStore)
+    Assert-Equal 2 $all.Count
+    Assert-True ($all[0].Id -gt $all[1].Id) 'newest must come first'
+    Assert-Equal 'Backup' $all[0].Kind
+    Assert-Equal 1 $all[0].Files
+    Assert-True ($all[0].Bytes -gt 0) 'bytes must be recorded in the manifest'
+}
+
+Test-Case 'pruning keeps the requested number' {
+    foreach ($i in 1..3) {
+        Start-Sleep -Milliseconds 1100
+        Backup-GSSave -EntryName 'PruneMe' -Target $sandbox -RawPaths @('savesrc') -Store $saveStore -Keep 2 | Out-Null
+    }
+    $all = @(Get-GSSaveBackup -EntryName 'PruneMe' -Store $saveStore)
+    Assert-Equal 2 $all.Count
+}
+
+Test-Case 'restore brings the bytes back and keeps a safety copy' {
+    $live = Join-Path $sandbox 'savesrc\a.dat'
+    $original = [System.IO.File]::ReadAllText($live)
+
+    $b = Backup-GSSave -EntryName 'RestoreMe' -Target $sandbox -RawPaths @('savesrc') -Store $saveStore
+    [System.IO.File]::WriteAllText($live, 'CORRUPTED')
+    Assert-Equal 'CORRUPTED' ([System.IO.File]::ReadAllText($live))
+
+    $r = Restore-GSSave -EntryName 'RestoreMe' -Target $sandbox -RawPaths @('savesrc') `
+        -Store $saveStore -BackupId $b.Id
+    Assert-Equal 1 $r.Restored
+    Assert-Equal $original ([System.IO.File]::ReadAllText($live)) 'content must match the original'
+    Assert-True ($null -ne $r.SafetyCopy) 'a safety copy must be made'
+
+    # the safety copy holds what was live at restore time, i.e. the corrupted text
+    $safeFile = Join-Path $r.SafetyCopy 'p0\a.dat'
+    Assert-True (Test-Path -LiteralPath $safeFile) 'safety copy must contain the file'
+    Assert-Equal 'CORRUPTED' ([System.IO.File]::ReadAllText($safeFile))
+}
+
+Test-Case 'restore refuses when there is no backup' {
+    $threw = $false
+    try {
+        Restore-GSSave -EntryName 'NeverBackedUp' -Target $sandbox -RawPaths @('savesrc') -Store $saveStore
+    } catch { $threw = $true }
+    Assert-True $threw 'must throw'
+}
+
+Test-Case 'save candidates find an in-game save folder' {
+    $g = Join-Path $sandbox 'candgame'
+    New-Item -ItemType Directory -Path (Join-Path $g 'savedata') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $g 'savedata\s.dat') -Value 'x'
+    $c = @(Find-GSSaveCandidate -EntryName 'Cand Game' -Target $g)
+    Assert-True ($c.Count -ge 1) 'must find the savedata folder'
+    Assert-True ($c[0].Path.EndsWith('savedata')) 'first hit should be the save folder'
+}
+
+Test-Case 'shelf Items is a plain array, usable with @()' {
+    # A List here makes @() throw "parameter type mismatch" for callers, even
+    # though .Count and foreach work - a trap worth pinning down.
+    $data = Get-GSShelf -Shelf $shelf -SkipSize
+    Assert-True ($data.Items -is [array]) 'Items must be an array, not a List'
+    Assert-Equal 3 (@($data.Items)).Count
+}
+
+Test-Case 'launch map reads back an entry''s executable' {
+    $mf = Join-Path $shelf '_launch.txt'
+    @('Hollow Knight|hollow_knight.exe', 'Some Collection|FOLDER') |
+    Set-Content -LiteralPath $mf -Encoding UTF8
+    $map = Import-GSLaunchMap -Shelf $shelf
+    Assert-Equal 2 $map.Keys.Count
+    Assert-Equal 'FOLDER' $map['Some Collection']
+    # the exe does not exist in the sandbox, so the resolver returns null
+    Assert-True ($null -eq (Get-GSLaunchExe -Shelf $shelf -EntryName 'Hollow Knight' -Target $sandbox)) 'missing exe resolves to null'
+    Assert-True ($null -eq (Get-GSLaunchExe -Shelf $shelf -EntryName 'Some Collection' -Target $sandbox)) 'FOLDER resolves to null'
+}
+
 # ---------------------------------------------------------------- env
 
 Write-Host ''
