@@ -37,12 +37,15 @@ One shelf, several machines, and games that add themselves.
   recognised. New entries land under `-Category` (default `Unsorted`) with the note
   `自动加入，待分类`, and `sync -Root %main%` keeps their targets portable.
 - `sync -Commit` and `-Push` keep the shelf in git, with `Export-GSShelfGitIgnore`
-  writing the shape that makes it safe: ignore everything, allow back only the
-  files that describe the shelf. Git does not descend into an ignored directory, so
-  the junctions — which point at tens of GB of game folders — cannot be committed,
-  and staging is done by name rather than `git add -A` so a wrong .gitignore cannot
-  turn a one-line change into a commit of somebody's game library. Tested for
-  exactly that.
+  writing the shape that makes it safe: ignore everything, allow back the shelf's
+  own text (`*.txt`, `*.md`, `*.csv`, `.gitignore` at the root, so a hand-written
+  note travels too) and re-ignore `_roots.txt` after that, because git applies the
+  last matching pattern and the roots are the one file that is *supposed* to differ
+  per machine. Git does not descend into an ignored directory, so the junctions —
+  which point at tens of GB of game folders — cannot be committed, and staging is
+  done by name, at the root and without recursing, so a wrong .gitignore cannot turn
+  a one-line change into a commit of somebody's game library. Tested for exactly
+  that, including that `_roots.txt` never lands in the repository.
 - `sync -Register [-At 20:00]` schedules the same command as a per-user task
   (interactive logon type, so no password is stored and no admin rights are
   needed); `-Unregister` removes it. The task is a trigger, not a policy.
@@ -61,6 +64,10 @@ One shelf, several machines, and games that add themselves.
 
 ### Fixed
 
+- **The shelf .gitignore allowed `_roots.txt` through**, which the documentation
+  right next to it said should stay local: committing it would hand the second
+  machine the first machine's drive letters, silently. Caught while publishing a
+  real shelf to a repository, where it would have been committed.
 - **`New-GSShelf`'s `-Items` never worked**: it assigned to a local `$items`, which
   is the `-Items` parameter as far as PowerShell is concerned (variable names are
   case-insensitive), so the guard at the top read a variable it had just set to

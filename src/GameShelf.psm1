@@ -1327,17 +1327,20 @@ function Export-GSShelfGitIgnore {
 
     $body = @(
         '# A shelf is junctions pointing at game folders, so ignore everything and'
-        '# allow back only the files that describe the shelf. Git does not descend'
-        '# into an ignored directory, which is what keeps game data (and _saves,'
-        '# and _ui) out of the repository.'
+        '# A shelf is junctions pointing at game folders, so ignore everything and'
+        '# allow back the text files that describe it. Git does not descend into an'
+        '# ignored directory, which is what keeps game data (and _saves, and _ui)'
+        '# out of the repository however the files get staged.'
         '*'
-        '!_shelf.txt'
-        '!_saves.txt'
-        '!_launch.txt'
-        '!_roots.txt'
-        '!CATALOG.md'
-        '!index.csv'
+        '!*.txt'
+        '!*.md'
+        '!*.csv'
         '!.gitignore'
+        ''
+        '# ...except the roots, which are the one thing that is SUPPOSED to differ'
+        '# per machine. The last matching pattern wins in gitignore, so this line'
+        '# beats !*.txt above.'
+        '_roots.txt'
         ''
     )
     if (-not $PSCmdlet.ShouldProcess($path, 'Write a shelf .gitignore')) { return $false }
@@ -1412,10 +1415,19 @@ function Invoke-GSShelfCommit {
 
     $ignoreWritten = Export-GSShelfGitIgnore -Shelf $Shelf -WhatIf:$WhatIfPreference
 
-    $names = @('_shelf.txt', '_saves.txt', '_launch.txt', '_roots.txt', 'CATALOG.md', 'index.csv', '.gitignore')
+    # Staged by name, from the shelf's own root and without recursing: the same
+    # rule the .gitignore states, applied a second time so that a wrong or deleted
+    # .gitignore cannot turn a one-line manifest change into a commit of somebody's
+    # game library. _roots.txt is deliberately not among them - it is the file that
+    # is supposed to differ per machine.
+    $names = New-Object System.Collections.Generic.List[string]
+    foreach ($f in @(Get-ChildItem -LiteralPath $Shelf -File -ErrorAction SilentlyContinue)) {
+        if ($f.Name -eq $script:GSRootsName) { continue }
+        if ($f.Name -eq '.gitignore' -or @('.txt', '.md', '.csv') -contains $f.Extension) { $names.Add($f.Name) }
+    }
+
     $staged = New-Object System.Collections.Generic.List[string]
     foreach ($n in $names) {
-        if (-not (Test-Path -LiteralPath (Join-Path $Shelf $n))) { continue }
         if (-not $PSCmdlet.ShouldProcess($n, 'Stage')) { continue }
         $r = Invoke-GSShelfGit -Shelf $Shelf -Arguments @('add', '--', $n)
         if ($r.ExitCode -ne 0) { throw "git add $n failed: $($r.Output -join ' ')" }

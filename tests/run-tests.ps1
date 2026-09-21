@@ -1122,14 +1122,19 @@ Test-Case 'sync refuses an unbound root with the command to fix it' {
     Assert-True ($msg -like '*roots*') "the message should say what to run, got: $msg"
 }
 
-Test-Case 'the shelf gitignore ignores everything but the shelf itself' {
+Test-Case 'the shelf gitignore lets the shelf text through and nothing else' {
     Assert-True (Export-GSShelfGitIgnore -Shelf $rtShelf) 'writes when there is none'
     Assert-True (-not (Export-GSShelfGitIgnore -Shelf $rtShelf)) 'never overwrites one that exists'
     $text = [System.IO.File]::ReadAllText((Join-Path $rtShelf '.gitignore'))
     # \r? because the file is CRLF: in .NET, $ in multiline mode matches before \n,
     # and the \r is part of the line for the pattern's purposes.
-    Assert-True ($text -match '(?m)^\*\r?$') 'everything is ignored'
-    Assert-True ($text -match '!_shelf\.txt') 'and the shelf text is allowed back'
+    Assert-True ($text -match '(?m)^\*\r?$') 'everything is ignored by default'
+    Assert-True ($text -match '(?m)^!\*\.txt\r?$') 'the shelf text is allowed back'
+    # ...but the roots are the one thing that is supposed to differ per machine, and
+    # git applies the LAST matching pattern, so the re-ignore has to come after.
+    $allowed = $text.IndexOf('!*.txt')
+    $reignored = $text.LastIndexOf('_roots.txt')
+    Assert-True ($reignored -gt $allowed) '_roots.txt must be re-ignored after !*.txt'
 }
 
 Test-Case 'committing a shelf cannot pull game data in' {
@@ -1140,16 +1145,24 @@ Test-Case 'committing a shelf cannot pull game data in' {
         & git -C $rtShelf config user.email 'test@example.invalid' | Out-Null
         & git -C $rtShelf config user.name 'GameShelf Test' | Out-Null
 
+        # a hand-written note in the shelf root: it should travel to the other machine
+        Set-Content -LiteralPath (Join-Path $rtShelf 'NOTES.txt') -Value 'shelf notes' -Encoding UTF8
+
         $res = Invoke-GSShelfCommit -Shelf $rtShelf -Message 'Shelf: test'
         Assert-True $res.Committed 'the shelf files should be committed'
         Assert-True ($res.Changed -contains '_shelf.txt')
 
         $tracked = @(& git -C $rtShelf ls-files)
         Assert-True ($tracked -contains '_shelf.txt') 'the manifest is tracked'
+        Assert-True ($tracked -contains '.gitignore') 'and so is the ignore file itself'
+        Assert-True ($tracked -contains 'NOTES.txt') 'a hand-written note travels with the shelf'
         # The point: the junction points at a real game folder, and none of it may
         # end up in the repository.
         $leaked = @($tracked | Where-Object { $_ -like '*Game.exe' -or $_ -like 'Action/*' -or $_ -like 'Unsorted/*' })
         Assert-Equal 0 $leaked.Count ("game data must not be tracked, got: " + ($leaked -join ', '))
+        # A hand-written note in the shelf travels; the roots binding does not, or
+        # the second machine would inherit the first machine's drive letters.
+        Assert-True (-not ($tracked -contains '_roots.txt')) '_roots.txt must never be committed'
 
         $again = Invoke-GSShelfCommit -Shelf $rtShelf -Message 'Shelf: test'
         Assert-True (-not $again.Committed) 'nothing changed, so nothing to commit'
