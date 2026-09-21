@@ -4,6 +4,86 @@ All notable changes to GameShelf are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] - 2026-09-22
+
+One shelf, several machines, and games that add themselves.
+
+### Added
+
+- **Portable targets.** A manifest target may be written `%label%\rest`, and the
+  label is bound to a real folder per machine in `<shelf>\_roots.txt`:
+
+  ```
+  # <label>|<folder>
+  main|H:\@game
+  games|D:\MyGame
+  ```
+
+  One `_shelf.txt` then describes the same library on a machine whose drives are
+  laid out differently, which is what makes the shelf worth keeping in git.
+  Absolute targets are untouched, so a single-machine shelf never notices the
+  feature exists. `%APPDATA%`-style tokens work in a target too, through the same
+  table the save map uses.
+
+- `roots` — lists what this machine has bound, how many entries use each label, and
+  prints the exact `-Set` command for the ones that are still missing.
+  `roots -Set main=H:\@game` binds one; `roots -Portable` rewrites the drive letters
+  of an existing shelf into `%label%` paths (longest root wins when roots nest,
+  targets outside every root are left alone, and the junctions on disk are not
+  touched). `-Set` also accepts the whole list as one string, because cmd.exe and
+  `powershell -File` do not parse array syntax.
+- `sync` — scans the roots, finds games that are not on the shelf yet, and adds
+  them. Comparison is on the resolved target, so a renamed entry is still
+  recognised. New entries land under `-Category` (default `Unsorted`) with the note
+  `自动加入，待分类`, and `sync -Root %main%` keeps their targets portable.
+- `sync -Commit` and `-Push` keep the shelf in git, with `Export-GSShelfGitIgnore`
+  writing the shape that makes it safe: ignore everything, allow back only the
+  files that describe the shelf. Git does not descend into an ignored directory, so
+  the junctions — which point at tens of GB of game folders — cannot be committed,
+  and staging is done by name rather than `git add -A` so a wrong .gitignore cannot
+  turn a one-line change into a commit of somebody's game library. Tested for
+  exactly that.
+- `sync -Register [-At 20:00]` schedules the same command as a per-user task
+  (interactive logon type, so no password is stored and no admin rights are
+  needed); `-Unregister` removes it. The task is a trigger, not a policy.
+- An entry whose label this machine has not bound is reported as `Unresolved`
+  rather than `Broken`: the shelf is fine, this machine just has not been told
+  where that root lives. `verify` counts them, prints the `roots` command, and
+  `build` skips them with a message naming the label.
+- The launcher resolves targets through `_roots.txt` too, shows only the entries
+  this machine actually has, and says how many are elsewhere (`另有 N 款不在本机`).
+  When none of them are here it explains why instead of showing an empty window.
+  The tile tooltip, "copy real path" and the launcher picker all use the resolved
+  folder.
+- `Get-GSShelf` rows carry `Path` (resolved here) alongside `Target` (as written),
+  and the save commands use `Path`, since `GAME\` save paths can only be resolved
+  against a real folder.
+
+### Fixed
+
+- **`New-GSShelf`'s `-Items` never worked**: it assigned to a local `$items`, which
+  is the `-Items` parameter as far as PowerShell is concerned (variable names are
+  case-insensitive), so the guard at the top read a variable it had just set to
+  `$null`. Third time this family of bug has bitten this codebase; the CLI's
+  `$label` locals, which would have shadowed the new `-Label` parameter, were
+  renamed in the same pass.
+- `Invoke-GSShelfGit` let git's stderr become a terminating `NativeCommandError`
+  under `$ErrorActionPreference = 'Stop'`, so asking "is this a git repo?" about a
+  folder that is not one threw git's message instead of answering the question.
+- `Export-GSRoots` now creates the shelf folder if it is missing: on a second
+  machine the roots file is the first thing written, before anything else exists.
+- `-Shot` created its parent folder with `New-Item`, which refuses a drive root;
+  `Directory.CreateDirectory` is a no-op there.
+
+### Notes
+
+- Another PowerShell trap for the collection, found by `sync` returning one item
+  made of both: **`@(Some-Function ...)` nests the result when that function
+  returns its list through a leading comma** (`return , $list`), so `foreach`
+  iterates once over the whole list and every `.Name` becomes an array. Assign
+  first, then iterate. `@($variable)` on a `List[object]` still throws, as recorded
+  in 1.3.0 — the two are different traps with the same smell.
+
 ## [1.3.0] - 2026-09-21
 
 Two integrations, both optional at runtime. Nothing in either is needed for a shelf

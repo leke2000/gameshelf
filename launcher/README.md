@@ -174,6 +174,21 @@ Geometry and ratios cannot tell you whether a gradient is muddy or the spacing l
 right. This is the same window, drawn into a file, so it can be looked at, sent to
 someone, or diffed against the previous one after a change.
 
+## On a shelf that travels
+
+If the manifest uses `%label%` targets (see [One shelf, several
+machines](../README.md#one-shelf-several-machines)), the launcher resolves them
+through `<shelf>\_roots.txt` exactly as the CLI does. The reader is duplicated on
+purpose: `install.ps1` copies this script into `<shelf>\_ui\` on its own, which is
+what makes the launcher portable, so it cannot import the module — the same reason
+it already parses `_shelf.txt` and `_launch.txt` itself.
+
+Only entries this machine actually has are shown, and the status line says how many
+are elsewhere (`另有 N 款不在本机`). When none of them are here — a fresh clone whose
+roots are not bound yet — the window says so and points at the `roots` command
+instead of drawing sixty dead tiles. The tooltip, "copy real path" and the launcher
+picker all use the resolved folder, never the portable form.
+
 ## One Windows gotcha worth recording
 
 `launch.vbs` starts PowerShell through `WScript.Shell.Run(cmd, 0, False)` so no

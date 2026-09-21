@@ -537,22 +537,30 @@ function Invoke-GSScan {
 function New-GSShelf {
     <#
     .SYNOPSIS
-        Materialise a shelf from a manifest.
+        Materialise a shelf from a manifest, or from items handed straight in.
     .DESCRIPTION
         By default an existing shelf is merged with, not replaced: entries that are
-        not mentioned in the new manifest keep their place. Use -Replace to make the
-        manifest the single source of truth instead.
+        not mentioned keep their place. Use -Replace to make the input the single
+        source of truth instead.
+
+        A target written as %label%\rest resolves through the shelf's _roots.txt.
+        The manifest keeps the portable form - only the filesystem work below ever
+        sees an absolute path, so the same _shelf.txt is valid on another machine.
     #>
     [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param(
-        [Parameter(Mandatory, Position = 0)][string]$Manifest,
+        [Parameter(Position = 0)][string]$Manifest,
         [Parameter(Mandatory, Position = 1)][string]$Shelf,
         [ValidateSet('Link', 'Move', 'Copy')][string]$Mode = 'Link',
+        [object[]]$Items,
         [switch]$Force,
         [switch]$Replace
     )
 
-    $items = Import-GSManifest -Path $Manifest
+    $list = $null
+    if ($Items) { $list = @($Items) }
+    elseif ($Manifest) { $list = Import-GSManifest -Path $Manifest }
+    if (-not $list) { throw 'New-GSShelf needs -Manifest or -Items.' }
 
     if (-not (Test-Path -LiteralPath $Shelf)) {
         if ($PSCmdlet.ShouldProcess($Shelf, 'Create shelf root')) {
@@ -561,22 +569,37 @@ function New-GSShelf {
     }
     $Shelf = (Get-Item -LiteralPath $Shelf -Force).FullName
 
+    # Bound per machine; empty on a shelf that has no roots file, which is every
+    # shelf whose targets are plain paths.
+    $roots = Import-GSRoots -Shelf $Shelf
+
     $created = 0; $skipped = 0; $failed = 0
     $placed = New-Object System.Collections.Generic.List[object]
 
-    foreach ($item in $items) {
+    foreach ($item in $list) {
         $categoryDir = Join-Path $Shelf $item.Category
         $link = Join-Path $categoryDir $item.Name
 
-        if (-not (Test-Path -LiteralPath $item.Target)) {
-            Write-Warning "Target missing, skipped: $($item.Target)"
+        $resolved = Resolve-GSTarget -Target $item.Target -Roots $roots
+        if ($resolved.Unresolved) {
+            Write-Warning ("Skipped '$($item.Name)': $($resolved.Why) ($($item.Target)). " +
+                "Bind it with: gameshelf.ps1 roots -Shelf `"$Shelf`" -Set $($resolved.Label)=<folder>")
+            $failed++
+            continue
+        }
+        $absolute = $resolved.Path
+
+        if (-not (Test-Path -LiteralPath $absolute)) {
+            $what = $absolute
+            if ($absolute -ne $item.Target) { $what = "$($item.Target)  ->  $absolute" }
+            Write-Warning "Target missing, skipped: $what"
             $failed++
             continue
         }
         if (Test-Path -LiteralPath $link) {
             if (Test-GSLink -Path $link) {
                 $existing = Get-GSLinkTarget -Path $link
-                $sameTarget = ($existing -eq $item.Target)
+                $sameTarget = ($existing -eq $absolute)
                 if (-not $sameTarget) {
                     Write-Warning "Link exists but points elsewhere, skipped: $link -> $existing"
                     $failed++
@@ -594,16 +617,16 @@ function New-GSShelf {
             }
         }
 
-        if (-not $PSCmdlet.ShouldProcess($link, "$Mode $($item.Target)")) { continue }
+        if (-not $PSCmdlet.ShouldProcess($link, "$Mode $absolute")) { continue }
 
         try {
             if (-not (Test-Path -LiteralPath $categoryDir)) {
                 New-Item -ItemType Directory -Path $categoryDir -Force | Out-Null
             }
             switch ($Mode) {
-                'Link' { New-GSLink -LinkPath $link -TargetPath $item.Target | Out-Null }
-                'Move' { Move-Item -LiteralPath $item.Target -Destination $link -Force }
-                'Copy' { Copy-Item -LiteralPath $item.Target -Destination $link -Recurse -Force }
+                'Link' { New-GSLink -LinkPath $link -TargetPath $absolute | Out-Null }
+                'Move' { Move-Item -LiteralPath $absolute -Destination $link -Force }
+                'Copy' { Copy-Item -LiteralPath $absolute -Destination $link -Recurse -Force }
             }
             $created++
             $placed.Add($item)
@@ -633,12 +656,16 @@ function New-GSShelf {
         }
     }
 
-    Export-GSManifest -Path $shelfManifest -Items $placed -Meta @{
+    # 'source' only means something when the entries came from a manifest file;
+    # sync builds them in memory, and an empty header line would be noise.
+    $meta = @{
         mode    = $Mode
         shelf   = $Shelf
         created = (Get-Date -Format 's')
-        source  = $Manifest
     }
+    if ($Manifest) { $meta['source'] = $Manifest }
+
+    Export-GSManifest -Path $shelfManifest -Items $placed -Meta $meta
 
     return [pscustomobject]@{
         Shelf    = $Shelf
@@ -648,7 +675,7 @@ function New-GSShelf {
         Failed   = $failed
         Kept     = $kept
         OnShelf  = $placed.Count
-        Total    = $items.Count
+        Total    = $list.Count
     }
 }
 
@@ -676,13 +703,25 @@ function Get-GSShelf {
     $items = Import-GSManifest -Path $manifest
     $rows = New-Object System.Collections.Generic.List[object]
 
+    # Targets are returned as written - the catalog and the launcher both show the
+    # shelf's own description of itself, which is the portable form. Path is the
+    # resolved absolute folder, and is what anything touching the filesystem uses.
+    $roots = Import-GSRoots -Shelf $Shelf
+
     foreach ($i in $items) {
         $link = Join-Path (Join-Path $Shelf $i.Category) $i.Name
+        $resolved = Resolve-GSTarget -Target $i.Target -Roots $roots
+        $path = $resolved.Path
+
         $status = 'Missing'
-        if (Test-Path -LiteralPath $link) {
+        if ($resolved.Unresolved) {
+            # The shelf is fine; this machine has not bound that root. Calling it
+            # broken would send someone looking for a problem that is not there.
+            $status = 'Unresolved'
+        } elseif (Test-Path -LiteralPath $link) {
             if (Test-GSLink -Path $link) {
                 $status = 'Link'
-                if (-not (Test-Path -LiteralPath $i.Target)) { $status = 'Broken' }
+                if (-not (Test-Path -LiteralPath $path)) { $status = 'Broken' }
             } else {
                 $status = 'Folder'
             }
@@ -691,7 +730,7 @@ function Get-GSShelf {
         $gb = $null
         if (-not $SkipSize) {
             $probe = $link
-            if ($status -eq 'Broken' -or $status -eq 'Missing') { $probe = $i.Target }
+            if ($status -eq 'Broken' -or $status -eq 'Missing') { $probe = $path }
             if (Test-Path -LiteralPath $probe) { $gb = (Get-GSFolderSize -Path $probe).GB }
         }
 
@@ -699,6 +738,7 @@ function Get-GSShelf {
                 Category = $i.Category
                 Name     = $i.Name
                 Target   = $i.Target
+                Path     = $path
                 Note     = $i.Note
                 Status   = $status
                 SizeGB   = $gb
@@ -788,8 +828,13 @@ function Select-GSShelfEntry {
 
     $want = $Target.TrimEnd('\')
     foreach ($i in @($Items | Where-Object { $_ })) {
-        if (-not $i.Target) { continue }
-        if (([string]$i.Target).TrimEnd('\') -ieq $want) { $i }
+        # Path is the resolved folder; Target may be a portable %label%\... form,
+        # which a caller holding a real folder can never match against.
+        $have = $i.Target
+        $prop = $i.PSObject.Properties['Path']
+        if ($null -ne $prop -and $prop.Value) { $have = $prop.Value }
+        if (-not $have) { continue }
+        if (([string]$have).TrimEnd('\') -ieq $want) { $i }
     }
 }
 
@@ -1027,6 +1072,519 @@ function Test-GSIsElevated {
 
 #endregion ---------------------------------------------------------- environment
 
+#region ------------------------------------------------------------------ roots
+
+$script:GSRootsName = '_roots.txt'
+
+# What sync writes into a new entry's note. The note is shown by the launcher as
+# the tile's subtitle, so it doubles as the reminder to sort the entry properly.
+$script:GSSyncNote = '自动加入，待分类'
+
+function Get-GSRootsPath {
+    <#
+    .SYNOPSIS
+        Path of a shelf's roots file.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory, Position = 0)][string]$Shelf)
+    return (Join-Path $Shelf $script:GSRootsName)
+}
+
+function Import-GSRoots {
+    <#
+    .SYNOPSIS
+        Read a shelf's root map: label -> folder on this machine.
+    .DESCRIPTION
+        A manifest may write a target as %label%\rest instead of an absolute path,
+        and the label is bound to a real folder per machine in _roots.txt:
+
+            # <label>|<folder>
+            main|H:\@game
+            games|D:\MyGame
+
+        One manifest then describes the same library on a machine where the folders
+        sit on other drives, which is what makes the shelf worth keeping in git.
+        Absolute targets keep working exactly as before - roots are opt-in, and a
+        single-machine shelf can ignore the whole idea.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory, Position = 0)][string]$Shelf)
+
+    $map = @{}
+    $path = Get-GSRootsPath -Shelf $Shelf
+    if (-not (Test-Path -LiteralPath $path)) { return $map }
+
+    foreach ($line in [System.IO.File]::ReadAllLines($path, [System.Text.Encoding]::UTF8)) {
+        $t = $line.Trim()
+        if ($t -eq '' -or $t.StartsWith('#')) { continue }
+        $i = $t.IndexOf('|')
+        if ($i -lt 1) { continue }
+        $label = $t.Substring(0, $i).Trim()
+        $dir = $t.Substring($i + 1).Trim()
+        if ($label -eq '' -or $dir -eq '') { continue }
+        $map[$label] = $dir
+    }
+    return $map
+}
+
+function Export-GSRoots {
+    <#
+    .SYNOPSIS
+        Write a shelf's root map.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory, Position = 0)][string]$Shelf,
+        [Parameter(Mandatory)][hashtable]$Roots
+    )
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add('# GameShelf roots: <label>|<folder>, for this machine only.')
+    $lines.Add('# A target in _shelf.txt written %label%\like\this resolves through here,')
+    $lines.Add('# so the same manifest works on a machine whose drives are laid out')
+    $lines.Add('# differently. Keep this file out of version control.')
+    foreach ($k in ($Roots.Keys | Sort-Object)) {
+        $dir = ([string]$Roots[$k]).Trim()
+        if ($dir -eq '') { continue }
+        $lines.Add($k + '|' + $dir)
+    }
+    $path = Get-GSRootsPath -Shelf $Shelf
+    if (-not $PSCmdlet.ShouldProcess($path, "Write $($Roots.Count) root(s)")) { return }
+
+    # The shelf folder may not exist yet: on a second machine the roots file is the
+    # first thing to write, and build needs it before it can create anything.
+    $dir = Split-Path -Parent $path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { [void][System.IO.Directory]::CreateDirectory($dir) }
+
+    Write-GSLineFile -Path $path -Lines $lines.ToArray()
+}
+
+function Resolve-GSTarget {
+    <#
+    .SYNOPSIS
+        Expand a manifest target through a shelf's roots, or say why it cannot be.
+    .DESCRIPTION
+        %label%\rest goes through _roots.txt, and %APPDATA%-style tokens go through
+        the same table the save map uses, so targets and save paths speak one
+        language. Anything else is already a path and is returned unchanged.
+
+        This never throws. A portable shelf opened on a machine that has not bound
+        every label is a normal state - `list` says Unresolved rather than pretending
+        the entry is broken - and the callers that do want to stop (build, sync)
+        check Unresolved and tell the user which command to run.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, Position = 0)][AllowEmptyString()][string]$Target,
+        [hashtable]$Roots
+    )
+
+    $t = ([string]$Target).Trim()
+    $plain = [pscustomobject]@{ Path = $t; Label = ''; Unresolved = $false; Why = '' }
+    if (-not $t) { return $plain }
+    if ($t -notmatch '^%([^%]+)%') { return $plain }
+
+    $label = $Matches[1]
+    $rest = $t.Substring($label.Length + 2).TrimStart('\')
+
+    # The environment tokens come first: %APPDATA% in a target should mean what it
+    # means in a save path, not a root someone happened to name APPDATA.
+    foreach ($pair in $script:GSSaveTokens) {
+        if (([string]$pair[0]).Trim('%') -ieq $label) {
+            $base = [string]$pair[1]
+            if (-not $base) { break }
+            $p = $base
+            if ($rest) { $p = Join-Path $base $rest }
+            return [pscustomobject]@{ Path = $p; Label = $label; Unresolved = $false; Why = 'environment token' }
+        }
+    }
+
+    if ($Roots -and $Roots.ContainsKey($label)) {
+        $base = ([string]$Roots[$label]).Trim()
+        $p = $base
+        if ($rest) { $p = Join-Path $base $rest }
+        return [pscustomobject]@{ Path = $p; Label = $label; Unresolved = $false; Why = 'shelf root' }
+    }
+
+    return [pscustomobject]@{
+        Path       = $t
+        Label      = $label
+        Unresolved = $true
+        Why        = "root '$label' is not bound on this machine"
+    }
+}
+
+function Invoke-GSSync {
+    <#
+    .SYNOPSIS
+        Find games under the scan roots that are not on the shelf yet.
+    .DESCRIPTION
+        The read-only half of `sync`: scan, compare against what the shelf already
+        has, and return the entries that are new. Nothing is written - the caller
+        decides whether to build them in and commit.
+
+        Comparison is on the resolved target, not the label or the folder name, so
+        an entry that was renamed on the shelf is still recognised as present. A
+        root may be given as %label%, in which case new targets are written in that
+        portable form; otherwise they are absolute, exactly like a hand-written
+        manifest.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, Position = 0)][string]$Shelf,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Root,
+        [string]$Category = 'Unsorted',
+        [int]$Depth = 2,
+        [double]$MinSizeGB = 0.05,
+        [switch]$SkipSize
+    )
+
+    $roots = Import-GSRoots -Shelf $Shelf
+
+    $existing = @{}
+    $broken = 0
+    foreach ($e in (Get-GSShelf -Shelf $Shelf -SkipSize).Items) {
+        if ($e.Status -eq 'Broken' -or $e.Status -eq 'Missing') { $broken++ }
+        $r = Resolve-GSTarget -Target $e.Target -Roots $roots
+        if ($r.Unresolved) { continue }
+        $existing[$r.Path.TrimEnd('\').ToLowerInvariant()] = $e.Name
+    }
+
+    $new = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    $known = 0
+    $ignored = 0
+
+    foreach ($entry in @($Root | Where-Object { $_ })) {
+        $res = Resolve-GSTarget -Target $entry -Roots $roots
+        if ($res.Unresolved) {
+            throw ("Root '$entry' is not bound on this machine. Bind it with: " +
+                "gameshelf.ps1 roots -Shelf '$Shelf' -Set $($res.Label)=<folder>")
+        }
+        $label = ''
+        if ($res.Why -eq 'shelf root') { $label = $res.Label }
+        $dir = $res.Path
+
+        # Not @(Invoke-GSScan ...): it returns its list through a leading comma, so
+        # wrapping it again nests the whole list into a single element - every
+        # $f.Name then becomes an array of every name found. Assign first, and let
+        # foreach enumerate.
+        $found = Invoke-GSScan -Root $dir -Depth $Depth -MinSizeGB $MinSizeGB -SkipSize:$SkipSize
+        foreach ($f in $found) {
+            if ($f.Kind -ne 'Game') { $ignored++; continue }
+            $abs = ([string]$f.Path).TrimEnd('\')
+            $key = $abs.ToLowerInvariant()
+            if ($existing.ContainsKey($key) -or $seen.ContainsKey($key)) { $known++; continue }
+            $seen[$key] = $true
+
+            $target = $abs
+            if ($label) {
+                $rel = Get-GSRelativeTo -Child $abs -Ancestor $dir
+                if ($null -ne $rel) {
+                    $target = '%' + $label + '%'
+                    if ($rel) { $target = $target + '\' + $rel }
+                }
+            }
+
+            $new.Add([pscustomobject]@{
+                    Category = $Category
+                    Name     = $f.Name
+                    Target   = $target
+                    Note     = $script:GSSyncNote
+                })
+        }
+    }
+
+    return [pscustomobject]@{
+        Shelf   = $Shelf
+        Added   = $new.ToArray()
+        Known   = $known
+        Ignored = $ignored
+        Broken  = $broken
+        Roots   = @($Root | Where-Object { $_ }).Count
+    }
+}
+
+function Export-GSShelfGitIgnore {
+    <#
+    .SYNOPSIS
+        Write the shelf's .gitignore: ignore everything, allow back the shelf itself.
+    .DESCRIPTION
+        A shelf is junctions pointing at game folders - tens or hundreds of GB that
+        git would walk into and stage if you so much as ran `git add -A`. Git does
+        not descend into an ignored directory, so ignoring everything and allowing
+        back only the files that describe the shelf keeps game data out of the
+        repository by construction rather than by remembering.
+
+        Returns $true when the file was written, $false when one was already there
+        (it is never overwritten - it may have been edited).
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([Parameter(Mandatory, Position = 0)][string]$Shelf)
+
+    $path = Join-Path $Shelf '.gitignore'
+    if (Test-Path -LiteralPath $path) { return $false }
+
+    $body = @(
+        '# A shelf is junctions pointing at game folders, so ignore everything and'
+        '# allow back only the files that describe the shelf. Git does not descend'
+        '# into an ignored directory, which is what keeps game data (and _saves,'
+        '# and _ui) out of the repository.'
+        '*'
+        '!_shelf.txt'
+        '!_saves.txt'
+        '!_launch.txt'
+        '!_roots.txt'
+        '!CATALOG.md'
+        '!index.csv'
+        '!.gitignore'
+        ''
+    )
+    if (-not $PSCmdlet.ShouldProcess($path, 'Write a shelf .gitignore')) { return $false }
+    Write-GSLineFile -Path $path -Lines $body
+    return $true
+}
+
+function Invoke-GSShelfGit {
+    <#
+    .SYNOPSIS
+        Run git inside a shelf and return what it said.
+    .DESCRIPTION
+        git's stderr is data here, not a failure: `rev-parse` on a folder that is
+        not a repository prints to stderr and exits non-zero, and with the module's
+        caller running under $ErrorActionPreference = 'Stop' that line would surface
+        as a terminating NativeCommandError instead of the message the caller wants
+        to print. Scoping the preference down keeps the diagnosis in ExitCode.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Shelf,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Arguments
+    )
+
+    $output = & {
+        $ErrorActionPreference = 'Continue'
+        & git -C $Shelf @Arguments 2>&1
+    }
+    $code = $LASTEXITCODE
+    return [pscustomobject]@{
+        ExitCode = $code
+        Output   = @($output | ForEach-Object { [string]$_ })
+    }
+}
+
+function Test-GSShelfGitRepo {
+    <#
+    .SYNOPSIS
+        Whether the shelf is inside a git working tree.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory, Position = 0)][string]$Shelf)
+
+    if (-not (Get-Command git -CommandType Application -ErrorAction SilentlyContinue)) { return $false }
+    $r = Invoke-GSShelfGit -Shelf $Shelf -Arguments @('rev-parse', '--is-inside-work-tree')
+    return ($r.ExitCode -eq 0 -and ($r.Output -join ' ') -match 'true')
+}
+
+function Invoke-GSShelfCommit {
+    <#
+    .SYNOPSIS
+        Commit a shelf's own files, and optionally push.
+    .DESCRIPTION
+        Stages the shelf's files by name rather than `git add -A`. The .gitignore
+        should already keep game data out, but naming the files means that a wrong
+        or deleted .gitignore cannot turn a one-line manifest change into a commit
+        of somebody's game library. Nothing else in the folder is ever staged.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory, Position = 0)][string]$Shelf,
+        [string]$Message = 'Shelf: sync',
+        [switch]$Push,
+        [switch]$RequireRemote
+    )
+
+    if (-not (Test-GSShelfGitRepo -Shelf $Shelf)) {
+        throw ("Not a git repository: $Shelf`n" +
+            "To keep the shelf in git:  git -C `"$Shelf`" init -b main`n" +
+            "                           git -C `"$Shelf`" remote add origin <url>")
+    }
+
+    $ignoreWritten = Export-GSShelfGitIgnore -Shelf $Shelf -WhatIf:$WhatIfPreference
+
+    $names = @('_shelf.txt', '_saves.txt', '_launch.txt', '_roots.txt', 'CATALOG.md', 'index.csv', '.gitignore')
+    $staged = New-Object System.Collections.Generic.List[string]
+    foreach ($n in $names) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Shelf $n))) { continue }
+        if (-not $PSCmdlet.ShouldProcess($n, 'Stage')) { continue }
+        $r = Invoke-GSShelfGit -Shelf $Shelf -Arguments @('add', '--', $n)
+        if ($r.ExitCode -ne 0) { throw "git add $n failed: $($r.Output -join ' ')" }
+        $staged.Add($n)
+    }
+
+    $pending = Invoke-GSShelfGit -Shelf $Shelf -Arguments @('diff', '--cached', '--name-only')
+    if ($pending.ExitCode -ne 0) { throw "git diff failed: $($pending.Output -join ' ')" }
+    $changed = @($pending.Output | Where-Object { $_.Trim() })
+
+    $result = [pscustomobject]@{
+        Committed     = $false
+        Changed       = $changed
+        Message       = ''
+        Pushed        = $false
+        IgnoreWritten = $ignoreWritten
+    }
+    if ($changed.Count -eq 0) { return $result }
+
+    if (-not $PSCmdlet.ShouldProcess($Shelf, "Commit $($changed.Count) file(s)")) { return $result }
+    $c = Invoke-GSShelfGit -Shelf $Shelf -Arguments @('commit', '-m', $Message)
+    if ($c.ExitCode -ne 0) { throw "git commit failed: $($c.Output -join ' ')" }
+    $result.Committed = $true
+    $result.Message = ($c.Output | Select-Object -First 1)
+    if (-not $Push) { return $result }
+
+    $remote = Invoke-GSShelfGit -Shelf $Shelf -Arguments @('remote')
+    if (@($remote.Output | Where-Object { $_.Trim() }).Count -eq 0) {
+        if ($RequireRemote) { throw "The shelf has no git remote, so there is nothing to push to. Add one: git -C `"$Shelf`" remote add origin <url>" }
+        return $result
+    }
+    if (-not $PSCmdlet.ShouldProcess($Shelf, 'Push')) { return $result }
+    $p = Invoke-GSShelfGit -Shelf $Shelf -Arguments @('push')
+    if ($p.ExitCode -ne 0) { throw "git push failed: $($p.Output -join ' ')" }
+    $result.Pushed = $true
+    return $result
+}
+
+function Register-GSSyncTask {
+    <#
+    .SYNOPSIS
+        Schedule `sync` to run on this machine, so new games add themselves.
+    .DESCRIPTION
+        A per-user task with an interactive logon type, so no password is stored and
+        nothing needs administrator rights. It runs the CLI with -Commit (and -Push),
+        which means a game dropped into a scan root ends up on the shelf and in the
+        repository without anyone remembering to run anything.
+
+        The task is the trigger, not the policy: the same command can be run by hand,
+        and -Unregister removes the task without touching the shelf.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)][string]$Shelf,
+        [Parameter(Mandatory)][string]$Cli,
+        [AllowEmptyCollection()][string[]]$Root,
+        [string]$At = '20:00',
+        [switch]$Push,
+        [string]$TaskName = 'GameShelf sync'
+    )
+
+    if (-not (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue)) {
+        throw 'Register-ScheduledTask is not available on this system; schedule the same command with schtasks.exe instead.'
+    }
+
+    $argLine = '-NoProfile -ExecutionPolicy Bypass -File "{0}" sync -Shelf "{1}"' -f $Cli, $Shelf
+    foreach ($r in @($Root | Where-Object { $_ })) { $argLine += ' -Root "{0}"' -f $r }
+    $argLine += ' -Commit'
+    if ($Push) { $argLine += ' -Push' }
+
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $argLine
+    $trigger = New-ScheduledTaskTrigger -Daily -At $At
+    $principal = New-ScheduledTaskPrincipal -UserId ("{0}\{1}" -f $env:USERDOMAIN, $env:USERNAME) -LogonType Interactive
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 1)
+
+    $result = [pscustomobject]@{
+        Task     = $TaskName
+        At       = $At
+        Command  = $argLine
+        Registered = $false
+    }
+    if (-not $PSCmdlet.ShouldProcess($TaskName, "Run 'sync' daily at $At")) { return $result }
+
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+        -Principal $principal -Settings $settings -Force `
+        -Description 'GameShelf: add newly detected games to the shelf' | Out-Null
+    $result.Registered = $true
+    return $result
+}
+
+function Unregister-GSSyncTask {
+    <#
+    .SYNOPSIS
+        Remove the scheduled sync task, if there is one.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([string]$TaskName = 'GameShelf sync')
+
+    $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if (-not $existing) {
+        return [pscustomobject]@{ Task = $TaskName; Found = $false; Removed = $false }
+    }
+    if (-not $PSCmdlet.ShouldProcess($TaskName, 'Remove the scheduled sync task')) {
+        return [pscustomobject]@{ Task = $TaskName; Found = $true; Removed = $false }
+    }
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+    return [pscustomobject]@{ Task = $TaskName; Found = $true; Removed = $true }
+}
+
+function ConvertTo-GSPortableShelf {
+    <#
+    .SYNOPSIS
+        Rewrite absolute targets that sit under a bound root as %label%\relative.
+    .DESCRIPTION
+        The migration for a shelf that already exists: a manifest written on one
+        machine is full of drive letters and means nothing on another. Anything
+        already under a bound root becomes portable, the most specific root wins
+        when roots nest, and targets matching no root are left exactly as they were.
+
+        Only the manifest is rewritten. The junctions on disk already point at the
+        same folders, and stay valid because a %label% resolves back to the same
+        path on this machine.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([Parameter(Mandatory, Position = 0)][string]$Shelf)
+
+    $mapPath = Join-Path $Shelf $script:GSManifestName
+    if (-not (Test-Path -LiteralPath $mapPath)) { throw "Not a gameshelf (no $script:GSManifestName): $Shelf" }
+
+    $roots = Import-GSRoots -Shelf $Shelf
+    if ($roots.Keys.Count -eq 0) {
+        throw ("No roots are bound. Add one first: " +
+            "gameshelf.ps1 roots -Shelf `"$Shelf`" -Set main=<folder>")
+    }
+
+    # Longest folder first, so a root nested inside another does not win by accident.
+    $labels = @($roots.Keys | Sort-Object { -([string]$roots[$_]).Length })
+
+    $list = Import-GSManifest -Path $mapPath
+    $changed = New-Object System.Collections.Generic.List[object]
+    foreach ($it in $list) {
+        $resolved = Resolve-GSTarget -Target $it.Target -Roots $roots
+        if ($resolved.Label) { continue }   # already portable, or an environment token
+        foreach ($label in $labels) {
+            $rel = Get-GSRelativeTo -Child $it.Target -Ancestor $roots[$label]
+            if ($null -eq $rel -or $rel -eq '') { continue }
+            $it.Target = '%' + $label + '%\' + $rel
+            $changed.Add($it)
+            break
+        }
+    }
+
+    $result = [pscustomobject]@{
+        Shelf   = $Shelf
+        Total   = $list.Count
+        Changed = $changed.Count
+        Items   = $changed.ToArray()
+        Written = $false
+    }
+    if ($changed.Count -eq 0) { return $result }
+    if (-not $PSCmdlet.ShouldProcess($mapPath, "Make $($changed.Count) target(s) portable")) { return $result }
+
+    Export-GSManifest -Path $mapPath -Items $list -Meta (Get-GSManifestMeta -Path $mapPath)
+    $result.Written = $true
+    return $result
+}
+
+#endregion --------------------------------------------------------------- roots
+
 #region ------------------------------------------------------------- launch map
 
 $script:GSLaunchMapName = '_launch.txt'
@@ -1088,6 +1646,11 @@ Export-ModuleMember -Function @(
     'Find-GSSaveCandidate', 'Get-GSSaveStore',
     'Backup-GSSave', 'Get-GSSaveBackup', 'Restore-GSSave',
     'Import-GSLaunchMap', 'Get-GSLaunchExe', 'Select-GSShelfEntry',
+    # roots: portable manifest targets, bound per machine
+    'Get-GSRootsPath', 'Import-GSRoots', 'Export-GSRoots', 'Resolve-GSTarget',
+    'Invoke-GSSync', 'ConvertTo-GSPortableShelf',
+    'Export-GSShelfGitIgnore', 'Test-GSShelfGitRepo', 'Invoke-GSShelfGit', 'Invoke-GSShelfCommit',
+    'Register-GSSyncTask', 'Unregister-GSSyncTask',
     # save-map path tools, shared by the Ludusavi bridge
     'Get-GSRelativeTo', 'ConvertTo-GSSaveMapPath', 'Test-GSPathIsSpecific',
     'Get-GSPathClusterRoot', 'Group-GSPathCluster',

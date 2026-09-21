@@ -101,6 +101,8 @@ prints *why* each folder was detected, so you review before anything is built.
 | `remove` | Take entries off the shelf (`-All`, `-Name`, `-Category`) |
 | `adopt` | Ask Ludusavi where the unmapped games keep their saves, and record it |
 | `playnite` | Read Playnite's library export: draft a manifest, or compare with the shelf |
+| `roots` | Bind the folders a portable manifest names as `%label%`, or list them |
+| `sync` | Add games that appeared since last time; optionally commit, push, schedule |
 
 Every command supports `-WhatIf` and `-Verbose`.
 
@@ -293,6 +295,89 @@ Playnite"), and the format is due to change. It also keeps the extension thin
 enough to port — Playnite 11 drops PowerShell script extensions, and only the
 export writer would have to move.
 
+## One shelf, several machines
+
+A manifest written on one machine is full of drive letters, and the second machine
+has different ones. Write a target as `%label%\rest` instead, and bind the label to
+a folder here in `<shelf>\_roots.txt`:
+
+```
+# <label>|<folder>          per machine - this is the file that should differ
+main|H:\@game
+games|D:\MyGame
+```
+
+```powershell
+.\gameshelf.ps1 roots -Shelf H:\Games                     # what is bound, what is missing
+.\gameshelf.ps1 roots -Shelf H:\Games -Set main=H:\@game  # bind one
+.\gameshelf.ps1 roots -Shelf H:\Games -Portable           # existing drive letters -> %label%
+```
+
+`roots -Portable` is the migration for a shelf that already exists: anything under a
+bound root becomes portable, the most specific root wins when roots nest, and
+targets outside every root are left exactly as they were. The junctions on disk are
+not touched.
+
+On the second machine: copy or clone the shelf, bind the labels to whatever the
+folders are called there, and build.
+
+```powershell
+.\gameshelf.ps1 roots -Shelf E:\Games -Set main=E:\Games\installed
+.\gameshelf.ps1 build -Manifest E:\Games\_shelf.txt -Shelf E:\Games
+```
+
+Entries whose label is not bound on this machine are reported as `Unresolved`
+rather than `Broken` — the shelf is fine, this machine has simply not been told
+where that root lives — and `verify` prints the `roots` command that fixes it.
+Absolute targets keep working exactly as before, so a one-machine shelf can ignore
+this whole section.
+
+## New games add themselves
+
+```powershell
+.\gameshelf.ps1 sync -Shelf H:\Games -Root %main% -Category Unsorted
+```
+
+`sync` scans the roots, compares against what the shelf already has — by resolved
+folder, so an entry you renamed still counts as present — and adds what is new under
+`-Category`, noted `自动加入，待分类` so it is obvious the category is a first guess.
+It never removes anything: a game that has gone stays until `remove` says otherwise,
+and `sync` reports how many entries point at folders that are missing.
+
+`-Root %main%` keeps the new targets portable; `-Root <folder> -Label main` binds
+that folder to a label in one step, so the first machine you run this on ends up
+portable too.
+
+## Keeping the shelf in git
+
+A shelf is a small pile of text files describing a very large pile of games, which
+is exactly what version control is for.
+
+```powershell
+git -C H:\Games init -b main
+git -C H:\Games remote add origin <your-private-repo>
+.\gameshelf.ps1 sync -Shelf H:\Games -Root %main% -Commit -Push
+```
+
+The first commit writes `<shelf>\.gitignore` in the shape that makes this safe:
+ignore everything, allow back only the files that describe the shelf. Git does not
+descend into an ignored directory, so the junctions — which point at tens of GB of
+game folders — cannot be committed, and the shelf's files are staged by name rather
+than with `git add -A` for the same reason. `_roots.txt` is meant to stay ignored:
+it is the one file that is *supposed* to differ between machines.
+
+To make it happen without being asked:
+
+```powershell
+.\gameshelf.ps1 sync -Shelf H:\Games -Root %main% -Commit -Push -Register -At 20:00
+.\gameshelf.ps1 sync -Shelf H:\Games -Unregister
+```
+
+That registers a per-user scheduled task with an interactive logon type, so nothing
+is stored and no administrator rights are needed. Drop a game into a root and it is
+on the shelf, and in the repository, by the next run — `-Push` needs a remote you
+have added yourself.
+
 ## Manifest format
 
 Plain text, one entry per line, UTF-8. Pipe-separated:
@@ -369,7 +454,8 @@ vs. replace semantics, and the guarantee that removal never touches data —
 plus the save-data suite and the integration suite: argument quoting, the JSON
 shapes the Ludusavi CLI answers with, path clustering and its specificity guard,
 the append-only map writers, the Playnite export round-trip, and matching a shelf
-against a library by path and by name. 73 in total.
+against a library by path and by name, portable targets and their per-machine roots,
+and a shelf commit that cannot pull game data in. 90 in total.
 
 ## Notes on writing PowerShell for this project
 
@@ -441,6 +527,8 @@ launcher\install.ps1 -ShelfPath H:\Games
 | `remove` | 取下条目（`-All` / `-Name` / `-Category`） |
 | `adopt` | 让 Ludusavi 指出未映射游戏的存档位置并记录下来 |
 | `playnite` | 读取 Playnite 的游戏库导出：生成清单，或与文件架对照 |
+| `roots` | 绑定可移植清单里的 `%标签%` 到本机目录，或列出绑定情况 |
+| `sync` | 把新出现的游戏加进文件架；可顺带提交、推送、定时 |
 
 所有命令都支持 `-WhatIf` 和 `-Verbose`。
 
@@ -564,6 +652,77 @@ LiteDB 格式，作者明确请求第三方工具不要直接读（"If you want 
 you need to make a plugin for Playnite"），而且这个格式即将变动。这样做也让扩展足够薄、
 便于迁移——Playnite 11 会移除 PowerShell 脚本扩展，到时候只需要把导出那部分改写掉。
 
+## 一份文件架，多台电脑
+
+在一台电脑上写出来的清单满是盘符，换台电脑就全对不上了。把目标写成 `%标签%\子路径`，
+再在 `<文件架>\_roots.txt` 里把标签绑到本机的目录：
+
+```
+# <标签>|<目录>         这个文件是按机器来的，正是应该每家不同的那一个
+main|H:\@game
+games|D:\MyGame
+```
+
+```powershell
+.\gameshelf.ps1 roots -Shelf H:\Games                     # 看绑了什么、缺什么
+.\gameshelf.ps1 roots -Shelf H:\Games -Set main=H:\@game  # 绑一个
+.\gameshelf.ps1 roots -Shelf H:\Games -Portable           # 把已有条目的盘符改成 %标签%
+```
+
+`-Portable` 是给"已经建好的文件架"做迁移用的：落在某个已绑定根目录下的目标会被改成
+可移植写法（根目录嵌套时以更具体的那个为准），不在任何根目录下的目标原样保留，磁盘上的
+联接一个都不动。
+
+到第二台电脑上：把整份文件架复制或克隆过去，把标签绑到那边的实际目录，然后建架即可。
+
+```powershell
+.\gameshelf.ps1 roots -Shelf E:\Games -Set main=E:\Games\installed
+.\gameshelf.ps1 build -Manifest E:\Games\_shelf.txt -Shelf E:\Games
+```
+
+某台电脑没绑定某个标签时，条目会被标成 `Unresolved` 而不是 `Broken`——文件架本身没问题，
+只是这台机器还不知道那个根在哪；`verify` 会把该执行的 `roots` 命令打出来。绝对路径的写法
+和以前完全一样，所以只用一台电脑的话可以完全无视这一节。
+
+## 新游戏自动进架
+
+```powershell
+.\gameshelf.ps1 sync -Shelf H:\Games -Root %main% -Category Unsorted
+```
+
+`sync` 扫描根目录，与文件架已有条目比对（按**解析后的目录**比，所以你改过名字的条目也算
+已存在），把新的按 `-Category` 加进去，备注写成 `自动加入，待分类`，提醒你这只是初次归类。
+它**从不删除**任何东西：游戏不在了也留着，等你用 `remove` 决定；`sync` 会告诉你有多少条目
+指向已经不存在的目录。
+
+`-Root %main%` 让新条目的目标也是可移植写法；`-Root <目录> -Label main` 可以一步把目录绑成
+标签，这样第一台机器跑完就已经是可移植的了。
+
+## 把文件架放进 git
+
+文件架是一小堆描述一大堆游戏的文本文件——正是版本控制该管的东西。
+
+```powershell
+git -C H:\Games init -b main
+git -C H:\Games remote add origin <你的私有仓库>
+.\gameshelf.ps1 sync -Shelf H:\Games -Root %main% -Commit -Push
+```
+
+第一次提交会写入 `<文件架>\.gitignore`，形状是"忽略一切、只放行描述文件架的那几个文件"。
+git 不会进入被忽略的目录，所以那些指向几十 GB 游戏目录的**联接根本不可能被提交**；暂存也是
+按文件名逐个来而不是 `git add -A`，同样是为了这个原因。`_roots.txt` 是故意留在忽略名单里的：
+它就是那个**应该**每台机器都不一样的东西。
+
+想让它自己发生：
+
+```powershell
+.\gameshelf.ps1 sync -Shelf H:\Games -Root %main% -Commit -Push -Register -At 20:00
+.\gameshelf.ps1 sync -Shelf H:\Games -Unregister
+```
+
+这会注册一个当前用户的计划任务（交互式登录类型，不存密码、不需要管理员权限）。往根目录里
+丢一个游戏，下一次运行后它就在文件架里、也在仓库里了——`-Push` 需要你自己先加好远端。
+
 ## 清单格式
 
 纯文本，每行一条，UTF-8，竖线分隔：
@@ -629,7 +788,7 @@ powershell -ExecutionPolicy Bypass -File tests\run-tests.ps1
 build/list/verify/index/remove 全流程、合并与替换语义，以及「取下条目绝不碰
 数据」这条保证；再加上存档与集成两部分：参数引用、Ludusavi CLI 的 JSON 结构、
 路径聚类及其「不许塌缩到根目录」的安全线、只追加的映射表写入、Playnite 导出的往返，
-以及按目录和按名字匹配文件架。合计 73 个。
+以及按目录和按名字匹配文件架。合计 90 个。
 
 ## 许可
 

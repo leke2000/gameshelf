@@ -17,7 +17,8 @@
     the app works when installed into <shelf>\_ui\.
 
 .PARAMETER NoUI
-    Skip the window and print the resolved launch target for every entry.
+    Skip the window and print the resolved launch target for every entry this machine
+    has.
 
 .PARAMETER Sakura
     Overlay drifting cherry petals. Off by default; the Xbox look is monochrome.
@@ -154,6 +155,90 @@ function Read-Shelf {
             })
     }
     return , $items
+}
+
+$script:RootsPath = Join-Path $ShelfPath '_roots.txt'
+
+function Read-Roots {
+    <#
+      The labels this machine has bound to folders:
+          # <label>|<folder>
+          main|H:\@game
+
+      Duplicated from the module on purpose. install.ps1 copies this script into
+      <shelf>\_ui\ on its own - that is what makes the launcher portable - so it
+      cannot import src\GameShelf.psm1, the same reason it already reads _shelf.txt
+      and _launch.txt itself.
+    #>
+    param([string]$Path)
+    $map = @{}
+    if (-not (Test-Path -LiteralPath $Path)) { return $map }
+    foreach ($line in [System.IO.File]::ReadAllLines($Path, [System.Text.Encoding]::UTF8)) {
+        $t = $line.Trim()
+        if ($t -eq '' -or $t.StartsWith('#')) { continue }
+        $i = $t.IndexOf('|')
+        if ($i -lt 1) { continue }
+        $map[$t.Substring(0, $i).Trim()] = $t.Substring($i + 1).Trim()
+    }
+    return $map
+}
+
+$script:envTokens = @(
+    @('%DOCUMENTS%', [Environment]::GetFolderPath('MyDocuments')),
+    @('%SAVEDGAMES%', (Join-Path $env:USERPROFILE 'Saved Games')),
+    @('%LOCALLOW%', (Join-Path $env:USERPROFILE 'AppData\LocalLow')),
+    @('%APPDATA%', $env:APPDATA),
+    @('%LOCALAPPDATA%', $env:LOCALAPPDATA),
+    @('%USERPROFILE%', $env:USERPROFILE)
+)
+
+function Resolve-ShelfTarget {
+    <#
+      %label%\rest resolves through _roots.txt, %APPDATA%-style tokens through the
+      environment, anything else is already a path. Bound says whether a label had
+      an answer, so an unbound one can be reported honestly instead of looking like
+      a game that went missing.
+    #>
+    param([string]$Target, [hashtable]$Roots)
+
+    $t = ([string]$Target).Trim()
+    if (-not $t) { return [pscustomobject]@{ Path = ''; Label = ''; Bound = $false } }
+    if ($t -notmatch '^%([^%]+)%') { return [pscustomobject]@{ Path = $t; Label = ''; Bound = $true } }
+
+    $label = $Matches[1]
+    $rest = $t.Substring($label.Length + 2).TrimStart('\')
+
+    foreach ($pair in $script:envTokens) {
+        if (([string]$pair[0]).Trim('%') -ieq $label) {
+            $base = [string]$pair[1]
+            if (-not $base) { break }
+            $p = $base
+            if ($rest) { $p = Join-Path $base $rest }
+            return [pscustomobject]@{ Path = $p; Label = $label; Bound = $true }
+        }
+    }
+    if ($Roots.ContainsKey($label)) {
+        $base = ([string]$Roots[$label]).Trim()
+        $p = $base
+        if ($rest) { $p = Join-Path $base $rest }
+        return [pscustomobject]@{ Path = $p; Label = $label; Bound = $true }
+    }
+    return [pscustomobject]@{ Path = $t; Label = $label; Bound = $false }
+}
+
+$script:roots = Read-Roots -Path $script:RootsPath
+
+function Get-RealPath {
+    <#
+      The folder this machine actually has for an entry. Target is the shelf's own
+      description of itself and may be a portable %label%\...; Path is what it means
+      here. Falls back to Target so a caller never ends up with nothing.
+    #>
+    param($Entry)
+    if ($null -eq $Entry) { return '' }
+    $p = $Entry.PSObject.Properties['Path']
+    if ($null -ne $p -and $p.Value) { return [string]$p.Value }
+    return [string]$Entry.Target
 }
 
 $script:LaunchConfigPath = Join-Path $ShelfPath '_launch.txt'
@@ -406,10 +491,20 @@ foreach ($e in $entries) {
     $e | Add-Member -NotePropertyName Mapped -NotePropertyValue $false -Force
     $e | Add-Member -NotePropertyName OpenFolderOnly -NotePropertyValue $false -Force
 
+    # A target may be written %label%\... so the manifest travels between machines;
+    # Path is what it means here, and Available is whether this machine has it at
+    # all - only the junction is proof, since that is what launching goes through.
+    $resolved = Resolve-ShelfTarget -Target $e.Target -Roots $script:roots
+    $e | Add-Member -NotePropertyName Path -NotePropertyValue $resolved.Path -Force
+    $e | Add-Member -NotePropertyName Portable -NotePropertyValue ([bool]$resolved.Label) -Force
+    $e | Add-Member -NotePropertyName Bound -NotePropertyValue $resolved.Bound -Force
+    $e | Add-Member -NotePropertyName Available -NotePropertyValue $false -Force
+
     $link = Join-Path (Join-Path $ShelfPath $e.Category) $e.Name
     $probe = $link
-    if (-not (Test-Path -LiteralPath $probe)) { $probe = $e.Target }
+    if (-not (Test-Path -LiteralPath $probe)) { $probe = $e.Path }
     if (-not (Test-Path -LiteralPath $probe)) { continue }
+    $e.Available = $true
 
     if ($script:launchMap.ContainsKey($e.Name)) {
         $rel = $script:launchMap[$e.Name]
@@ -438,7 +533,16 @@ foreach ($e in $entries) {
 }
 
 $launchable = @($entries | Where-Object { $_.ExePath })
-Write-Host ("  {0} entries, {1} launchable ({2:N1}s)" -f $entries.Count, $launchable.Count, $sw.Elapsed.TotalSeconds) -ForegroundColor DarkGray
+
+# The window shows this machine's shelf: an entry whose folder is not here cannot be
+# launched, and on a shelf that lives in git that is most of the library on the
+# second computer. The count of the rest is kept for the status line so the absence
+# is stated rather than hidden.
+$script:elsewhere = @($entries | Where-Object { -not $_.Available }).Count
+$entries = @($entries | Where-Object { $_.Available })
+
+Write-Host ("  {0} entries, {1} launchable, {2} not on this machine ({3:N1}s)" -f `
+        $entries.Count, $launchable.Count, $script:elsewhere, $sw.Elapsed.TotalSeconds) -ForegroundColor DarkGray
 
 if ($NoUI) {
     foreach ($g in ($entries | Group-Object Category | Sort-Object Name)) {
@@ -593,7 +697,7 @@ function Show-Toast([string]$Text) {
 function Start-Entry {
     param($Entry)
     if ($Entry.OpenFolderOnly) {
-        Start-Process explorer.exe $Entry.Target
+        Start-Process explorer.exe (Get-RealPath -Entry $Entry)
         Show-Toast ($Entry.Name + ' 是合集/压缩包，已打开目录')
         return
     }
@@ -639,7 +743,7 @@ function New-Tile {
     # context menu copies anyway - so put it under the cursor on hover.
     $tip = '' 
     if ($Entry.Note) { $tip = $Entry.Note + "`n" }
-    $tile.ToolTip = $tip + $Entry.Target
+    $tile.ToolTip = $tip + (Get-RealPath -Entry $Entry)
 
     $grad = New-Object System.Windows.Media.LinearGradientBrush
     $grad.StartPoint = New-Object System.Windows.Point(0, 0)
@@ -744,7 +848,7 @@ function New-Tile {
             param($s, $ev)
             $e = $s.Tag
             $p = $e.ExePath
-            if ($p) { $p = Split-Path -Parent $p } else { $p = $e.Target }
+            if ($p) { $p = Split-Path -Parent $p } else { $p = Get-RealPath -Entry $e }
             if (Test-Path -LiteralPath $p) { Start-Process explorer.exe $p }
         })
     $menu.Items.Add($miOpen) | Out-Null
@@ -754,7 +858,7 @@ function New-Tile {
     $miCopy.Tag = $Entry
     $miCopy.Add_Click({
             param($s, $ev)
-            [System.Windows.Clipboard]::SetText($s.Tag.Target)
+            [System.Windows.Clipboard]::SetText((Get-RealPath -Entry $s.Tag))
             Show-Toast '已复制路径'
         })
     $menu.Items.Add($miCopy) | Out-Null
@@ -768,12 +872,13 @@ function New-Tile {
             $dlg = New-Object Microsoft.Win32.OpenFileDialog
             $dlg.Filter = '可执行文件 (*.exe)|*.exe|所有文件 (*.*)|*.*'
             $dlg.Title = '选择要启动的程序 — ' + $e.Name
-            if (Test-Path -LiteralPath $e.Target) { $dlg.InitialDirectory = $e.Target }
+            $real = Get-RealPath -Entry $e
+            if (Test-Path -LiteralPath $real) { $dlg.InitialDirectory = $real }
             if ($dlg.ShowDialog() -eq $true) {
                 $chosen = $dlg.FileName
                 $rel = $chosen
-                if ($chosen.StartsWith($e.Target, [System.StringComparison]::OrdinalIgnoreCase)) {
-                    $rel = $chosen.Substring($e.Target.Length).TrimStart('\')
+                if ($chosen.StartsWith($real, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $rel = $chosen.Substring($real.Length).TrimStart('\')
                 }
                 $script:launchMap[$e.Name] = $rel
                 Save-LaunchConfig -Path $script:LaunchConfigPath -Map $script:launchMap
@@ -1047,6 +1152,33 @@ function New-NavButton {
 function Rebuild-Content {
     $contentHost.Children.Clear()
 
+    if ($entries.Count -eq 0) {
+        <#
+          Everything on the shelf is somewhere else: a manifest that travels between
+          machines, opened on one whose roots are not bound yet - or a shelf whose
+          game folders have gone. Saying so beats an empty window.
+        #>
+        $none = New-Object System.Windows.Controls.TextBlock
+        $none.Text = '本机没有可用的游戏'
+        $none.FontSize = 15
+        $none.Margin = New-Object System.Windows.Thickness(24, 26, 24, 0)
+        $none.Foreground = New-Object System.Windows.Media.SolidColorBrush $script:COL_TEXT_LO
+        $contentHost.Children.Add($none) | Out-Null
+
+        if ($script:elsewhere -gt 0) {
+            $why = New-Object System.Windows.Controls.TextBlock
+            $why.Text = ("清单里有 {0} 款，但它们的目录不在这台电脑上。用 gameshelf.ps1 roots -Shelf <文件架> 看看要绑定哪些根目录。" -f $script:elsewhere)
+            $why.FontSize = 12
+            $why.TextWrapping = 'Wrap'
+            $why.MaxWidth = 820
+            $why.Margin = New-Object System.Windows.Thickness(24, 8, 24, 0)
+            $why.Foreground = New-Object System.Windows.Media.SolidColorBrush $script:COL_TEXT_LO
+            $contentHost.Children.Add($why) | Out-Null
+        }
+        Update-Status
+        return
+    }
+
     $query = $search.Text
     if ($query) {
         $hits = @($entries | Where-Object {
@@ -1110,11 +1242,13 @@ function Update-Status {
     param([string]$Scope = '')
 
     $hint = '双击磁贴启动，右键更多操作'
+    $elsewhere = ''
+    if ($script:elsewhere -gt 0) { $elsewhere = ("   ·   另有 {0} 款不在本机" -f $script:elsewhere) }
     if ($Scope) {
-        $status.Text = ("{0}   ·   库中 {1} 款   ·   {2}" -f $Scope, $entries.Count, $hint)
+        $status.Text = (("{0}   ·   本机 {1} 款   ·   {2}" -f $Scope, $entries.Count, $hint) + $elsewhere)
     } else {
-        $status.Text = ("{0} 款游戏   ·   {1} 个分类   ·   {2}" -f `
-                $entries.Count, @($entries | Group-Object Category).Count, $hint)
+        $status.Text = (("{0} 款游戏   ·   {1} 个分类   ·   {2}" -f `
+                $entries.Count, @($entries | Group-Object Category).Count, $hint) + $elsewhere)
     }
 }
 

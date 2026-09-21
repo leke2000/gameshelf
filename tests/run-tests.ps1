@@ -1006,6 +1006,214 @@ Test-Case 'the extension exports the functions Playnite calls' {
     Assert-True ($null -ne (Get-Command 'Export-GSPLLibrary' -ErrorAction SilentlyContinue))
 }
 
+# ---------------------------------------------------------------- roots + sync
+
+Write-Host ''
+Write-Host 'roots and sync' -ForegroundColor White
+
+$libRoot = Join-Path $sources 'lib'
+New-FakeGame -Name 'lib\Alpha' | Out-Null
+$rtShelf = Join-Path $sandbox 'rtshelf'
+$rtManifest = Join-Path $sandbox 'rt.txt'
+
+Test-Case 'a target resolves through the shelf roots' {
+    $roots = @{ main = $libRoot }
+    $r = Resolve-GSTarget -Target '%main%\Alpha' -Roots $roots
+    Assert-True (-not $r.Unresolved)
+    Assert-Equal (Join-Path $libRoot 'Alpha') $r.Path
+    Assert-Equal 'main' $r.Label
+
+    # a plain path is passed through, so absolute manifests keep working untouched
+    $plain = Resolve-GSTarget -Target 'Q:\games\X' -Roots $roots
+    Assert-Equal 'Q:\games\X' $plain.Path
+    Assert-Equal '' $plain.Label
+    Assert-True (-not $plain.Unresolved)
+
+    # %APPDATA% in a target means what it means in a save path
+    $env1 = Resolve-GSTarget -Target '%APPDATA%\Games\X'
+    Assert-Equal (Join-Path $env:APPDATA 'Games\X') $env1.Path
+    Assert-True (-not $env1.Unresolved)
+}
+
+Test-Case 'an unbound label says so instead of pretending' {
+    $r = Resolve-GSTarget -Target '%elsewhere%\Alpha' -Roots @{}
+    Assert-True $r.Unresolved
+    Assert-Equal 'elsewhere' $r.Label
+    Assert-True ($r.Why -like '*not bound*') "got: $($r.Why)"
+}
+
+Test-Case 'root map round-trips' {
+    $tmp = Join-Path $sandbox 'rootmap'
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    Export-GSRoots -Shelf $tmp -Roots @{ main = 'H:\@game'; games = 'D:\MyGame' }
+    $back = Import-GSRoots -Shelf $tmp
+    Assert-Equal 2 $back.Keys.Count
+    Assert-Equal 'H:\@game' $back['main']
+    $missing = Import-GSRoots -Shelf (Join-Path $sandbox 'noroots')
+    Assert-Equal 0 $missing.Keys.Count 'a shelf with no roots file is not an error'
+}
+
+Test-Case 'a shelf builds from a portable manifest and keeps it portable' {
+    Export-GSRoots -Shelf $rtShelf -Roots @{ main = $libRoot }
+    "Action|Alpha|%main%\Alpha|portable" | Set-Content -LiteralPath $rtManifest -Encoding UTF8
+
+    $res = New-GSShelf -Manifest $rtManifest -Shelf $rtShelf -Mode Link -Confirm:$false
+    Assert-Equal 1 $res.Created
+    Assert-Equal 0 $res.Failed
+    Assert-True (Test-Path -LiteralPath (Join-Path $rtShelf 'Action\Alpha\Game.exe')) 'the junction must resolve'
+
+    $data = Get-GSShelf -Shelf $rtShelf -SkipSize
+    Assert-Equal '%main%\Alpha' $data.Items[0].Target 'the manifest must keep the portable form'
+    Assert-Equal (Join-Path $libRoot 'Alpha') $data.Items[0].Path 'and resolve it for this machine'
+    Assert-Equal 'Link' $data.Items[0].Status
+}
+
+Test-Case 'an entry whose root is unbound is Unresolved, not Broken' {
+    $tmp = Join-Path $sandbox 'unboundshelf'
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    "Action|Ghost|%nowhere%\Ghost|" | Set-Content -LiteralPath (Join-Path $tmp '_shelf.txt') -Encoding UTF8
+
+    $data = Get-GSShelf -Shelf $tmp -SkipSize
+    Assert-Equal 'Unresolved' $data.Items[0].Status
+
+    $ver = Test-GSShelf -Shelf $tmp
+    Assert-Equal 'Unresolved' $ver.Report[0].Status
+    Assert-Equal 1 $ver.Bad 'it still needs attention - it is just not breakage'
+}
+
+Test-Case 'building against an unbound label fails with a usable message' {
+    $tmp = Join-Path $sandbox 'unboundshelf'
+    $mf = Join-Path $sandbox 'unbound.txt'
+    "Action|Ghost|%nowhere%\Ghost|" | Set-Content -LiteralPath $mf -Encoding UTF8
+    $res = New-GSShelf -Manifest $mf -Shelf $tmp -Mode Link -Confirm:$false -WarningAction SilentlyContinue
+    Assert-Equal 1 $res.Failed
+    Assert-Equal 0 $res.Created
+}
+
+Test-Case 'sync finds a game that appeared, and writes it portably' {
+    New-FakeGame -Name 'lib\Beta' | Out-Null
+    $res = Invoke-GSSync -Shelf $rtShelf -Root @('%main%') -SkipSize
+    Assert-Equal 1 $res.Added.Count 'only the new game'
+    Assert-Equal 'Beta' $res.Added[0].Name
+    Assert-Equal '%main%\Beta' $res.Added[0].Target 'the root was a label, so the target is portable'
+    Assert-Equal 1 $res.Known 'Alpha is already on the shelf'
+}
+
+Test-Case 'sync adds them to the shelf when asked to' {
+    $res = Invoke-GSSync -Shelf $rtShelf -Root @('%main%') -SkipSize
+    Assert-True (@($res.Added).Count -eq 1) 'the fixture expects one new game'
+    Assert-True (-not ($res -is [array])) 'Invoke-GSSync must return a single object'
+    $built = New-GSShelf -Shelf $rtShelf -Items $res.Added -Mode Link -Confirm:$false
+    Assert-Equal 1 $built.Created
+    Assert-True (Test-Path -LiteralPath (Join-Path $rtShelf 'Unsorted\Beta\Game.exe')) 'the new entry must be on the shelf'
+    $data = Get-GSShelf -Shelf $rtShelf -SkipSize
+    Assert-Equal 2 $data.Items.Count
+    # and a second sync has nothing left to do
+    $again = Invoke-GSSync -Shelf $rtShelf -Root @('%main%') -SkipSize
+    Assert-Equal 0 $again.Added.Count
+    Assert-Equal 2 $again.Known
+}
+
+Test-Case 'sync refuses an unbound root with the command to fix it' {
+    $threw = $false
+    $msg = ''
+    try { Invoke-GSSync -Shelf $rtShelf -Root @('%elsewhere%') -SkipSize } catch { $threw = $true; $msg = $_.Exception.Message }
+    Assert-True $threw
+    Assert-True ($msg -like '*roots*') "the message should say what to run, got: $msg"
+}
+
+Test-Case 'the shelf gitignore ignores everything but the shelf itself' {
+    Assert-True (Export-GSShelfGitIgnore -Shelf $rtShelf) 'writes when there is none'
+    Assert-True (-not (Export-GSShelfGitIgnore -Shelf $rtShelf)) 'never overwrites one that exists'
+    $text = [System.IO.File]::ReadAllText((Join-Path $rtShelf '.gitignore'))
+    # \r? because the file is CRLF: in .NET, $ in multiline mode matches before \n,
+    # and the \r is part of the line for the pattern's purposes.
+    Assert-True ($text -match '(?m)^\*\r?$') 'everything is ignored'
+    Assert-True ($text -match '!_shelf\.txt') 'and the shelf text is allowed back'
+}
+
+Test-Case 'committing a shelf cannot pull game data in' {
+    if (-not (Get-Command git -CommandType Application -ErrorAction SilentlyContinue)) {
+        Write-Host '        (git not available, skipped)' -ForegroundColor DarkGray
+    } else {
+        & git -C $rtShelf init -b main 2>&1 | Out-Null
+        & git -C $rtShelf config user.email 'test@example.invalid' | Out-Null
+        & git -C $rtShelf config user.name 'GameShelf Test' | Out-Null
+
+        $res = Invoke-GSShelfCommit -Shelf $rtShelf -Message 'Shelf: test'
+        Assert-True $res.Committed 'the shelf files should be committed'
+        Assert-True ($res.Changed -contains '_shelf.txt')
+
+        $tracked = @(& git -C $rtShelf ls-files)
+        Assert-True ($tracked -contains '_shelf.txt') 'the manifest is tracked'
+        # The point: the junction points at a real game folder, and none of it may
+        # end up in the repository.
+        $leaked = @($tracked | Where-Object { $_ -like '*Game.exe' -or $_ -like 'Action/*' -or $_ -like 'Unsorted/*' })
+        Assert-Equal 0 $leaked.Count ("game data must not be tracked, got: " + ($leaked -join ', '))
+
+        $again = Invoke-GSShelfCommit -Shelf $rtShelf -Message 'Shelf: test'
+        Assert-True (-not $again.Committed) 'nothing changed, so nothing to commit'
+    }
+}
+
+Test-Case 'committing outside a repository explains how to start one' {
+    $tmp = Join-Path $sandbox 'notarepo'
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    "Action|X|Q:\x|" | Set-Content -LiteralPath (Join-Path $tmp '_shelf.txt') -Encoding UTF8
+    Assert-True (-not (Test-GSShelfGitRepo -Shelf $tmp))
+    $threw = $false
+    $msg = ''
+    try { Invoke-GSShelfCommit -Shelf $tmp } catch { $threw = $true; $msg = $_.Exception.Message }
+    Assert-True $threw
+    Assert-True ($msg -like '*git*init*') "the message should name the commands, got: $msg"
+}
+
+Test-Case 'scheduling sync is a described command, not a surprise' {
+    if (-not (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue)) {
+        Write-Host '        (ScheduledTasks module not available, skipped)' -ForegroundColor DarkGray
+    } else {
+        $t = Register-GSSyncTask -Shelf $rtShelf -Cli 'C:\tools\gameshelf.ps1' -Root @('%main%') `
+            -At '20:00' -WhatIf
+        Assert-True (-not $t.Registered) '-WhatIf must not register anything'
+        Assert-True ($t.Command -like '*sync -Shelf*') 'the command it would run is reported'
+        Assert-True ($t.Command -like '*%main%*') 'the root keeps its portable form'
+        Assert-True ($t.Command -like '* -Commit*')
+    }
+}
+
+Test-Case 'an existing shelf can be made portable' {
+    $tmp = Join-Path $sandbox 'portme'
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    Export-GSRoots -Shelf $tmp -Roots @{ main = $libRoot }
+    @(
+        '# gameshelf v1'
+        "Action|Alpha|$(Join-Path $libRoot 'Alpha')|"
+        "Action|Elsewhere|Q:\games\Elsewhere|"
+    ) | Set-Content -LiteralPath (Join-Path $tmp '_shelf.txt') -Encoding UTF8
+
+    $conv = ConvertTo-GSPortableShelf -Shelf $tmp
+    Assert-Equal 1 $conv.Changed 'only the entry that sits under a bound root'
+    Assert-True $conv.Written
+
+    $items = Import-GSManifest -Path (Join-Path $tmp '_shelf.txt')
+    Assert-Equal '%main%\Alpha' $items[0].Target
+    Assert-Equal 'Q:\games\Elsewhere' $items[1].Target 'a target outside every root is left exactly as it was'
+
+    $again = ConvertTo-GSPortableShelf -Shelf $tmp
+    Assert-Equal 0 $again.Changed 'running it twice changes nothing the second time'
+}
+
+Test-Case 'converting without roots explains what to do' {
+    $tmp = Join-Path $sandbox 'norootconv'
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    "Action|Alpha|$(Join-Path $libRoot 'Alpha')|" | Set-Content -LiteralPath (Join-Path $tmp '_shelf.txt') -Encoding UTF8
+    $threw = $false
+    $msg = ''
+    try { ConvertTo-GSPortableShelf -Shelf $tmp } catch { $threw = $true; $msg = $_.Exception.Message }
+    Assert-True $threw
+    Assert-True ($msg -like '*roots*') "the message should name the command, got: $msg"
+}
+
 # ---------------------------------------------------------------- env
 
 Write-Host ''
