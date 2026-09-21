@@ -71,6 +71,11 @@ One shelf, several machines, and games that add themselves.
 - `sync -Commit` on a machine that has never set a git identity failed with git's
   raw "Author identity unknown". It now says which two commands to run, once, for
   that repository — the first thing anyone publishing a shelf hits.
+- **The first `-Push` from a fresh repository failed**, because a brand-new branch
+  has no upstream and plain `git push` refuses. It now sets the upstream itself. And
+  a run with nothing new to commit now still pushes whatever is sitting unpushed —
+  otherwise a commit that was made while the network was down, or without `-Push`,
+  would never go up, which for a scheduled sync means never.
 - **`New-GSShelf`'s `-Items` never worked**: it assigned to a local `$items`, which
   is the `-Items` parameter as far as PowerShell is concerned (variable names are
   case-insensitive), so the guard at the top read a variable it had just set to

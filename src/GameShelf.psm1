@@ -1445,24 +1445,24 @@ function Invoke-GSShelfCommit {
         Pushed        = $false
         IgnoreWritten = $ignoreWritten
     }
-    if ($changed.Count -eq 0) { return $result }
-
-    if (-not $PSCmdlet.ShouldProcess($Shelf, "Commit $($changed.Count) file(s)")) { return $result }
-    $c = Invoke-GSShelfGit -Shelf $Shelf -Arguments @('commit', '-m', $Message)
-    if ($c.ExitCode -ne 0) {
-        $detail = ($c.Output -join ' ')
-        # The first commit on a machine that has never set a git identity fails with
-        # "Author identity unknown", which is a configuration step rather than an
-        # error in the shelf - say which command fixes it.
-        if ($detail -match 'identity|who you are') {
-            throw ("git will not commit until it knows who you are. Set it once for this repository:`n" +
-                "  git -C `"$Shelf`" config user.name  `"Your Name`"`n" +
-                "  git -C `"$Shelf`" config user.email `"you@example.com`"")
+    if ($changed.Count -gt 0 -and $PSCmdlet.ShouldProcess($Shelf, "Commit $($changed.Count) file(s)")) {
+        $c = Invoke-GSShelfGit -Shelf $Shelf -Arguments @('commit', '-m', $Message)
+        if ($c.ExitCode -ne 0) {
+            $detail = ($c.Output -join ' ')
+            # The first commit on a machine that has never set a git identity fails
+            # with "Author identity unknown", which is a configuration step rather
+            # than a problem with the shelf - say which command fixes it.
+            if ($detail -match 'identity|who you are') {
+                throw ("git will not commit until it knows who you are. Set it once for this repository:`n" +
+                    "  git -C `"$Shelf`" config user.name  `"Your Name`"`n" +
+                    "  git -C `"$Shelf`" config user.email `"you@example.com`"")
+            }
+            throw "git commit failed: $detail"
         }
-        throw "git commit failed: $detail"
+        $result.Committed = $true
+        $result.Message = ($c.Output | Select-Object -First 1)
     }
-    $result.Committed = $true
-    $result.Message = ($c.Output | Select-Object -First 1)
+
     if (-not $Push) { return $result }
 
     $remote = Invoke-GSShelfGit -Shelf $Shelf -Arguments @('remote')
@@ -1471,7 +1471,31 @@ function Invoke-GSShelfCommit {
         return $result
     }
     if (-not $PSCmdlet.ShouldProcess($Shelf, 'Push')) { return $result }
-    $p = Invoke-GSShelfGit -Shelf $Shelf -Arguments @('push')
+
+    # The first push out of a repository that has just been created has no upstream,
+    # and plain `git push` refuses. Since publishing a shelf is the point here, set
+    # it rather than relaying git's instructions back to the user.
+    $branch = @(Invoke-GSShelfGit -Shelf $Shelf -Arguments @('rev-parse', '--abbrev-ref', 'HEAD'))
+    $name = ''
+    if ($branch.Count -gt 0) { $name = ([string]$branch[0].Output).Trim() }
+    $upstream = Invoke-GSShelfGit -Shelf $Shelf -Arguments @('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}')
+    $pushArgs = @('push')
+    $needsPush = $true
+    if ($upstream.ExitCode -ne 0) {
+        $pushArgs = @('push', '--set-upstream', 'origin', $name)
+    } else {
+        # An earlier run may have committed and then failed to push - a scheduled sync
+        # that only ever commits would leave the shelf unpublished for good, so a run
+        # with nothing new to commit still pushes what is sitting there.
+        $ahead = Invoke-GSShelfGit -Shelf $Shelf -Arguments @('rev-list', '--count', '@{u}..HEAD')
+        if ($ahead.ExitCode -eq 0 -and $ahead.Output.Count -gt 0) {
+            $n = 0
+            if ([int]::TryParse(([string]$ahead.Output[0]).Trim(), [ref]$n)) { $needsPush = ($n -gt 0) }
+        }
+    }
+    if (-not $needsPush) { return $result }
+
+    $p = Invoke-GSShelfGit -Shelf $Shelf -Arguments $pushArgs
     if ($p.ExitCode -ne 0) { throw "git push failed: $($p.Output -join ' ')" }
     $result.Pushed = $true
     return $result

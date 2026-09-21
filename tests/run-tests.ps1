@@ -1213,6 +1213,46 @@ Test-Case 'a repository without a git identity says how to fix it' {
     }
 }
 
+Test-Case 'the first push sets its own upstream' {
+    if (-not (Get-Command git -CommandType Application -ErrorAction SilentlyContinue)) {
+        Write-Host '        (git not available, skipped)' -ForegroundColor DarkGray
+    } else {
+        $tmp = Join-Path $sandbox 'pushtest'
+        $bare = Join-Path $sandbox 'pushtest.git'
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        "Action|X|Q:\x|" | Set-Content -LiteralPath (Join-Path $tmp '_shelf.txt') -Encoding UTF8
+        & git -C $tmp init -b main 2>&1 | Out-Null
+        & git -C $tmp config user.email 'test@example.invalid' | Out-Null
+        & git -C $tmp config user.name 'GameShelf Test' | Out-Null
+        # -b main: a bare repo initialised with the system default (master) would
+        # have a HEAD pointing at a branch the push never created.
+        & git init --bare -b main $bare 2>&1 | Out-Null
+        & git -C $tmp remote add origin $bare 2>&1 | Out-Null
+
+        # Plain `git push` fails here: the branch has no upstream yet.
+        $res = Invoke-GSShelfCommit -Shelf $tmp -Message 'Shelf: first' -Push
+        Assert-True $res.Committed
+        Assert-True $res.Pushed 'the first push must set the upstream itself'
+
+        $tree = @(& git -C $bare ls-tree -r --name-only HEAD)
+        Assert-True ($tree -contains '_shelf.txt') 'the manifest reached the remote'
+
+        # A commit that was made but never pushed - because the network was down, or
+        # because -Push was not asked for - must go up on the next run even though
+        # there is nothing new to commit. A scheduled sync depends on it.
+        Set-Content -LiteralPath (Join-Path $tmp '_shelf.txt') -Value '# changed' -Encoding UTF8
+        $queued = Invoke-GSShelfCommit -Shelf $tmp -Message 'Shelf: no push yet'
+        Assert-True $queued.Committed
+        Assert-True (-not $queued.Pushed) 'that call did not ask to push'
+
+        $retry = Invoke-GSShelfCommit -Shelf $tmp -Message 'Shelf: nothing new' -Push
+        Assert-True (-not $retry.Committed) 'there is nothing new to commit'
+        Assert-True $retry.Pushed 'but the queued commit should have been pushed'
+        $head = @(& git -C $bare log -1 --pretty=%s)
+        Assert-True (($head -join ' ') -like '*no push yet*') 'the remote is up to date now'
+    }
+}
+
 Test-Case 'scheduling sync is a described command, not a surprise' {
     if (-not (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue)) {
         Write-Host '        (ScheduledTasks module not available, skipped)' -ForegroundColor DarkGray
