@@ -22,20 +22,34 @@
 .PARAMETER Sakura
     Overlay drifting cherry petals. Off by default; the Xbox look is monochrome.
 
+.PARAMETER Shot
+    Render the composed window to this PNG file and exit, without opening a window.
+    -Diag prints the geometry; geometry does not tell you whether a long name is
+    clipped, a subtitle is unreadable against its gradient, or the spacing is off.
+    This does, on a machine with no display.
+
 .EXAMPLE
     .\GameLauncher.ps1
 .EXAMPLE
     .\GameLauncher.ps1 -ShelfPath H:\Games -NoUI
+.EXAMPLE
+    .\GameLauncher.ps1 -ShelfPath H:\Games -Shot C:\tmp\shelf.png
 #>
 [CmdletBinding()]
 param(
     [string]$ShelfPath,
     [switch]$NoUI,
     [switch]$Sakura,
-    [switch]$Diag
+    [switch]$Diag,
+    [string]$Shot
 )
 
 $ErrorActionPreference = 'Stop'
+
+# -NoUI prints launch targets, -Diag measures the layout, -Shot renders it: none of
+# them open a window, so none of them should claim the single-instance mutex or go
+# looking for a running launcher to bring forward.
+$headless = [bool]($NoUI -or $Diag -or $Shot)
 
 if (-not $ShelfPath) { $ShelfPath = Split-Path -Parent $PSScriptRoot }
 $manifest = Join-Path $ShelfPath '_shelf.txt'
@@ -57,7 +71,13 @@ public static extern bool SetForegroundWindow(System.IntPtr hWnd);
 
 # One window per shelf. Clicking the shortcut again should bring the running
 # library forward, not open a second copy of it.
-$script:InstancePidFile = Join-Path $PSScriptRoot '_instance.pid'
+#
+# Under the shelf's _ui rather than next to this script, matching where the shelf's
+# other state lives (_recent.txt, _layout.log) and what the README documents. The
+# two only differ when the launcher is run from a checkout instead of from
+# <shelf>\_ui\ - and then this way round, two copies of the launcher still find each
+# other's marker instead of each writing its own.
+$script:InstancePidFile = Join-Path (Join-Path $ShelfPath '_ui') '_instance.pid'
 
 function Get-ShelfMutexName {
     param([string]$Path)
@@ -93,7 +113,7 @@ function Focus-RunningInstance {
     }
 }
 
-if (-not $NoUI -and -not $Diag) {
+if (-not $headless) {
     $script:instanceMutex = New-Object System.Threading.Mutex($true, (Get-ShelfMutexName -Path $ShelfPath), [ref]$false)
     $isFirst = $false
     try { $isFirst = $script:instanceMutex.WaitOne(0, $false) } catch { $isFirst = $true }
@@ -473,8 +493,11 @@ if ($NoUI) {
 
         <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="22,0,0,0" VerticalAlignment="Center">
           <Border Width="26" Height="26" CornerRadius="6" Background="{StaticResource Accent}">
-            <TextBlock Text="&#x25B6;" FontSize="12" Foreground="White"
-                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            <!-- MinWidth: the glyph measures a hair wider than the cell the border
+                 gives it by default, and the right edge of the triangle was being
+                 cut. -Diag reports it as CLIPPED when it regresses. -->
+            <TextBlock Text="&#x25B6;" FontSize="12" MinWidth="16" TextAlignment="Center"
+                       Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center"/>
           </Border>
           <TextBlock Text="游戏库" FontSize="15" FontWeight="SemiBold" Margin="10,0,0,0"
                      VerticalAlignment="Center" Foreground="{StaticResource TextHi}"/>
@@ -489,7 +512,7 @@ if ($NoUI) {
             <TextBox x:Name="Search" Background="Transparent" BorderThickness="0" Foreground="White"
                      CaretBrush="White" FontSize="13" Margin="34,0,12,0" VerticalContentAlignment="Center"/>
             <TextBlock x:Name="SearchHint" Text="搜索游戏" FontSize="13" Margin="35,0,0,0"
-                       VerticalAlignment="Center" Foreground="#FF6E6E6E" IsHitTestVisible="False"/>
+                       VerticalAlignment="Center" Foreground="#FF9E9E9E" IsHitTestVisible="False"/>
           </Grid>
         </Border>
 
@@ -524,7 +547,7 @@ if ($NoUI) {
       </Grid>
 
       <Grid Grid.Row="2" Margin="24,0,24,0">
-        <TextBlock x:Name="Status" FontSize="11" Foreground="#FF6E6E6E" VerticalAlignment="Center"/>
+        <TextBlock x:Name="Status" FontSize="11" Foreground="#FF8A8A8A" VerticalAlignment="Center"/>
         <TextBlock x:Name="Toast" FontSize="11.5" Foreground="#FF8CD98C"
                    HorizontalAlignment="Right" VerticalAlignment="Center"/>
       </Grid>
@@ -611,6 +634,12 @@ function New-Tile {
     $tile.BorderBrush = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromArgb(0x00, 0xFF, 0xFF, 0xFF))
     $tile.Cursor = [System.Windows.Input.Cursors]::Hand
     $tile.Tag = $Entry
+
+    # The shelf label can be a rename of the real folder, and the path is what the
+    # context menu copies anyway - so put it under the cursor on hover.
+    $tip = '' 
+    if ($Entry.Note) { $tip = $Entry.Note + "`n" }
+    $tile.ToolTip = $tip + $Entry.Target
 
     $grad = New-Object System.Windows.Media.LinearGradientBrush
     $grad.StartPoint = New-Object System.Windows.Point(0, 0)
@@ -813,7 +842,12 @@ function New-TileGrid {
 }
 
 function New-Hero {
-    param($Entry)
+    <#
+      -Recent says whether this entry came from _recent.txt. Without it the banner
+      labelled whatever it was showing as "最近游玩" - including the first game on
+      the shelf, which nobody had played yet.
+    #>
+    param($Entry, [switch]$Recent)
     if (-not $Entry) { return $null }
 
     $hue = Get-NameHue -Name $Entry.Name
@@ -851,7 +885,7 @@ function New-Hero {
     $stack.Margin = New-Object System.Windows.Thickness(34, 0, 0, 0)
 
     $kicker = New-Object System.Windows.Controls.TextBlock
-    $kicker.Text = '最近游玩'
+    if ($Recent) { $kicker.Text = '最近游玩' } else { $kicker.Text = '开始游玩' }
     $kicker.FontSize = 11
     $kicker.Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromArgb(0xCC, 0xFF, 0xFF, 0xFF))
     $stack.Children.Add($kicker) | Out-Null
@@ -888,11 +922,19 @@ function New-Hero {
     $playGlyph = New-Object System.Windows.Controls.TextBlock
     $playGlyph.Text = [char]0x25B6
     $playGlyph.FontSize = 11
+    $playGlyph.MinWidth = 16
+    $playGlyph.TextAlignment = 'Center'
     $playGlyph.VerticalAlignment = 'Center'
     $playGlyph.Foreground = New-Object System.Windows.Media.SolidColorBrush $script:COL_TEXT_HI
     $playInner.Children.Add($playGlyph) | Out-Null
     $playText = New-Object System.Windows.Controls.TextBlock
-    $playText.Text = '启动'
+    # Say what the click will do. A collection or an archive opens its folder, and
+    # an entry with no executable yet does nothing until one is set - a button
+    # labelled 启动 in those cases is just wrong.
+    $playLabel = '启动'
+    if ($Entry.OpenFolderOnly) { $playLabel = '打开目录' }
+    elseif (-not $Entry.ExePath) { $playLabel = '未设置启动程序' }
+    $playText.Text = $playLabel
     $playText.FontSize = 13
     $playText.FontWeight = 'SemiBold'
     $playText.Margin = New-Object System.Windows.Thickness(8, 0, 0, 0)
@@ -907,6 +949,13 @@ function New-Hero {
 
     $grid.Children.Add($stack) | Out-Null
     $card.Child = $grid
+
+    # Exposed for -Diag, which reports what the banner claims to be showing.
+    $script:heroInfo = [pscustomobject]@{
+        Name   = $Entry.Name
+        Kicker = $kicker.Text
+        Action = $playLabel
+    }
     return $card
 }
 
@@ -1014,15 +1063,16 @@ function Rebuild-Content {
             $none.Foreground = New-Object System.Windows.Media.SolidColorBrush $script:COL_TEXT_LO
             $contentHost.Children.Add($none) | Out-Null
         }
-        Update-Status
+        Update-Status -Scope ('搜索：{0} 个结果' -f $hits.Count)
         return
     }
 
     if ($script:activeCat) {
         $items = @($entries | Where-Object { $_.Category -eq $script:activeCat })
-        $contentHost.Children.Add((New-Heading -Text ($script:activeCat -replace '^\d+_', '') -Right ("$($items.Count) 款"))) | Out-Null
+        $label = $script:activeCat -replace '^\d+_', ''
+        $contentHost.Children.Add((New-Heading -Text $label -Right ("$($items.Count) 款"))) | Out-Null
         $contentHost.Children.Add((New-TileGrid -Items $items)) | Out-Null
-        Update-Status
+        Update-Status -Scope ('{0}：{1} 款' -f $label, $items.Count)
         return
     }
 
@@ -1035,7 +1085,7 @@ function Rebuild-Content {
 
     $hero = $null
     if ($recent.Count -gt 0) { $hero = $recent[0] } elseif ($entries.Count -gt 0) { $hero = $entries[0] }
-    $heroCard = New-Hero -Entry $hero
+    $heroCard = New-Hero -Entry $hero -Recent:($recent.Count -gt 0)
     if ($heroCard) { $contentHost.Children.Add($heroCard) | Out-Null }
 
     if ($recent.Count -gt 1) {
@@ -1052,8 +1102,20 @@ function Rebuild-Content {
 }
 
 function Update-Status {
-    $shown = $contentHost.Children.Count
-    $status.Text = ("{0} 款游戏   ·   {1} 个分类   ·   双击磁贴启动，右键更多操作" -f $entries.Count, @($entries | Group-Object Category).Count)
+    <#
+      Says what is on screen, not what the shelf holds. After a search or a category
+      click the old line still reported the whole library next to a heading that
+      said "3 个结果", which reads as a bug.
+    #>
+    param([string]$Scope = '')
+
+    $hint = '双击磁贴启动，右键更多操作'
+    if ($Scope) {
+        $status.Text = ("{0}   ·   库中 {1} 款   ·   {2}" -f $Scope, $entries.Count, $hint)
+    } else {
+        $status.Text = ("{0} 款游戏   ·   {1} 个分类   ·   {2}" -f `
+                $entries.Count, @($entries | Group-Object Category).Count, $hint)
+    }
 }
 
 $navRail.Children.Add((New-NavButton -Code 'ALL' -Label '全部' -Value '' -Count $entries.Count)) | Out-Null
@@ -1094,11 +1156,134 @@ function Show-LauncherWindow {
 $window.Add_SourceInitialized({ Show-LauncherWindow })
 $window.Add_Loaded({ Show-LauncherWindow })
 
+#region diagnostics
+
+# Helpers for -Diag and -Shot. They are only ever called from those two paths, and
+# they exist so a UI change can be argued about with numbers instead of taste.
+
+function Get-Descendants {
+    param($Root, [Type]$Type)
+    $stack = New-Object System.Collections.Generic.Stack[object]
+    $stack.Push($Root)
+    while ($stack.Count -gt 0) {
+        $v = $stack.Pop()
+        $n = [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($v)
+        for ($i = 0; $i -lt $n; $i++) {
+            $child = [System.Windows.Media.VisualTreeHelper]::GetChild($v, $i)
+            if ($child -is $Type) { $child }
+            $stack.Push($child)
+        }
+    }
+}
+
+function Get-TextBlockList { param($Root) Get-Descendants -Root $Root -Type ([System.Windows.Controls.TextBlock]) }
+function Get-ButtonList { param($Root) Get-Descendants -Root $Root -Type ([System.Windows.Controls.Button]) }
+
+function Test-TextFits {
+    <#
+      Lays the same string out with the same typeface and compares the width it
+      needs with the width it was given. A TextBlock with no room and no
+      TextTrimming is cut off mid-word, which is invisible in a geometry dump.
+    #>
+    param($TextBlock)
+
+    $size = 12.0
+    if ($TextBlock.FontSize -gt 0) { $size = $TextBlock.FontSize }
+    $typeface = New-Object System.Windows.Media.Typeface($TextBlock.FontFamily,
+        $TextBlock.FontStyle, $TextBlock.FontWeight, $TextBlock.FontStretch)
+    $ft = New-Object System.Windows.Media.FormattedText($TextBlock.Text,
+        [System.Globalization.CultureInfo]::CurrentUICulture,
+        [System.Windows.FlowDirection]::LeftToRight, $typeface, $size,
+        [System.Windows.Media.Brushes]::White)
+
+    return [pscustomobject]@{
+        Needed = $ft.Width
+        Have   = $TextBlock.ActualWidth
+        Trims  = ($TextBlock.TextTrimming -ne [System.Windows.TextTrimming]::None)
+    }
+}
+
+function Get-RelativeLuminance {
+    param([System.Windows.Media.Color]$Colour)
+    $channel = {
+        param([double]$v)
+        $s = $v / 255.0
+        if ($s -le 0.03928) { return $s / 12.92 }
+        return [math]::Pow((($s + 0.055) / 1.055), 2.4)
+    }
+    return (0.2126 * (& $channel $Colour.R) + 0.7152 * (& $channel $Colour.G) + 0.0722 * (& $channel $Colour.B))
+}
+
+function Get-ContrastRatio {
+    param([System.Windows.Media.Color]$Fore, [System.Windows.Media.Color]$Back)
+    $a = Get-RelativeLuminance -Colour $Fore
+    $b = Get-RelativeLuminance -Colour $Back
+    $hi = [math]::Max($a, $b)
+    $lo = [math]::Min($a, $b)
+    return [math]::Round((($hi + 0.05) / ($lo + 0.05)), 2)
+}
+
+function Get-EffectiveBackground {
+    <#
+      Walks up from a text node blending whatever backgrounds it passes over, so a
+      white label inside a 13%-white badge on the window still reports the colour
+      it is really drawn against. Gradients are not blended, so text on the hero
+      banner reports against the window instead - optimistic, never pessimistic,
+      which keeps the audit free of false alarms.
+    #>
+    param($Visual)
+
+    $layers = New-Object System.Collections.Generic.List[object]
+    $cur = $Visual
+    while ($null -ne $cur) {
+        $prop = $cur.PSObject.Properties['Background']
+        if ($null -ne $prop -and $prop.Value -is [System.Windows.Media.SolidColorBrush]) {
+            $c = $prop.Value.Color
+            if ($c.A -gt 0) {
+                # A control's template repeats its own Background, so walking up
+                # meets the same semi-transparent layer twice. Counting it twice
+                # darkens the reading and invents failures that are not there.
+                $dup = $false
+                if ($layers.Count -gt 0) {
+                    $last = $layers[$layers.Count - 1]
+                    if ($last.A -eq $c.A -and $last.R -eq $c.R -and $last.G -eq $c.G -and $last.B -eq $c.B) { $dup = $true }
+                }
+                if (-not $dup) { $layers.Add($c) }
+            }
+        }
+        if ($layers.Count -ge 4) { break }
+        $cur = [System.Windows.Media.VisualTreeHelper]::GetParent($cur)
+    }
+
+    $result = [System.Windows.Media.Color]::FromArgb(255, 0x0F, 0x0F, 0x0F)
+    for ($i = $layers.Count - 1; $i -ge 0; $i--) {
+        $c = $layers[$i]
+        $a = $c.A / 255.0
+        $result = [System.Windows.Media.Color]::FromArgb(255,
+            [int]($c.R * $a + $result.R * (1 - $a)),
+            [int]($c.G * $a + $result.G * (1 - $a)),
+            [int]($c.B * $a + $result.B * (1 - $a)))
+    }
+
+    # The chain is returned as well: a contrast ratio is only actionable if you can
+    # see what it was measured against, and a wrong reading is obvious from it.
+    $chain = $layers | ForEach-Object { '#{0:X2}{1:X2}{2:X2}(a={3:X2})' -f $_.R, $_.G, $_.B, $_.A }
+    return [pscustomobject]@{
+        Colour = $result
+        Chain  = (($chain -join ' over ') + ' over #0F0F0F')
+    }
+}
+
+#endregion diagnostics
+
 if ($Diag) {
     <#
-      Headless layout check: measure the built grids, write the geometry to a log
-      and close. Confirms the tiles actually wrap into rows instead of forming one
-      long horizontal strip, which is the whole point of the tiled layout.
+      Headless layout check: measure the built grids, audit the text, and write it
+      all to a log. The grid geometry confirms the tiles actually wrap into rows
+      instead of forming one long horizontal strip; the rest checks the things a
+      layout can get wrong silently, which is unreadable text, clipped text and
+      targets too small to hit. -Shot draws the same window to a PNG for the parts
+      a measurement cannot judge.
     #>
     $window.Add_ContentRendered({
             $log = Join-Path (Join-Path $ShelfPath '_ui') '_layout.log'
@@ -1120,6 +1305,78 @@ if ($Diag) {
                                 $child.Children.Count, $cols.Count, $rows.Count, $child.ActualWidth, $child.ActualHeight))
                 }
             }
+
+            # ---- text: clipped or unreadable ------------------------------------
+            if ($script:heroInfo) {
+                $lines.Add('')
+                $lines.Add(('hero              : {0}' -f $script:heroInfo.Name))
+                $lines.Add(('  kicker / action : {0} / {1}' -f $script:heroInfo.Kicker, $script:heroInfo.Action))
+            }
+
+            $texts = @(Get-TextBlockList -Root $root)
+            $lines.Add('')
+            $lines.Add(('text blocks       : {0}' -f $texts.Count))
+
+            $clipped = 0
+            $ellipsised = 0
+            foreach ($t in $texts) {
+                if (-not $t.Text) { continue }
+                if ($t.TextWrapping -ne [System.Windows.TextWrapping]::NoWrap) { continue }
+                $fit = Test-TextFits -TextBlock $t
+                if ($fit.Needed -le ($fit.Have + 1)) { continue }
+                if ($fit.Trims) { $ellipsised++; continue }
+                $clipped++
+                $shown = $t.Text
+                if ($shown.Length -gt 40) { $shown = $shown.Substring(0, 37) + '...' }
+                $lines.Add(('  CLIPPED {0,7:N0}px text in {1,6:N0}px   "{2}"' -f $fit.Needed, $fit.Have, $shown))
+            }
+            $lines.Add(('  ellipsised      : {0}   (by design, TextTrimming is set)' -f $ellipsised))
+            $lines.Add(('  clipped         : {0}   (no room and no trimming - text is cut)' -f $clipped))
+
+            # ---- contrast against the surface behind each text -------------------
+            <#
+              WCAG AA wants 4.5:1 for body text and 3:1 for large text (>=18.66px
+              bold or >=24px). Text on a gradient reports against the window colour
+              instead of the gradient, so those readings are optimistic - the point
+              is to catch dim grey on near-black, which is what this UI had.
+            #>
+            $lines.Add('')
+            $lines.Add('contrast (WCAG AA: 4.5 body, 3.0 large)')
+            $worst = @()
+            foreach ($t in $texts) {
+                if (-not $t.Text) { continue }
+                $fg = $t.Foreground
+                if ($fg -isnot [System.Windows.Media.SolidColorBrush]) { continue }
+                if ($fg.Color.A -lt 255) { continue }   # alpha blended elsewhere; skip rather than guess
+                $backInfo = Get-EffectiveBackground -Visual $t
+                $back = $backInfo.Colour
+                $ratio = Get-ContrastRatio -Fore $fg.Color -Back $back
+                $large = ($t.FontSize -ge 24) -or (($t.FontSize -ge 18.66) -and ($t.FontWeight.ToString() -match 'Bold|SemiBold|Black|Heavy'))
+                $need = 3.0
+                if (-not $large) { $need = 4.5 }
+                if ($ratio -lt $need) {
+                    $shown = $t.Text
+                    if ($shown.Length -gt 30) { $shown = $shown.Substring(0, 27) + '...' }
+                    # The resolved background is printed too: a ratio is only worth
+                    # acting on if you can see what it was measured against.
+                    $worst += ('  FAIL {0,5:N2}:1  need {1:N1}  {2,5:N1}px  on #{3:X2}{4:X2}{5:X2}  "{6}"' -f `
+                            $ratio, $need, $t.FontSize, $back.R, $back.G, $back.B, $shown)
+                    $worst += ('       layers: {0}' -f $backInfo.Chain)
+                }
+            }
+            if ($worst.Count -eq 0) { $lines.Add('  all readable') } else { foreach ($w in $worst) { $lines.Add($w) } }
+
+            # ---- hit targets ----------------------------------------------------
+            $small = @()
+            foreach ($b in @(Get-ButtonList -Root $root)) {
+                if ($b.ActualWidth -lt 32 -or $b.ActualHeight -lt 32) {
+                    $small += ('  small target {0,4:N0} x {1,-4:N0} {2}' -f $b.ActualWidth, $b.ActualHeight, $b.GetType().Name)
+                }
+            }
+            $lines.Add('')
+            $lines.Add(('hit targets < 32px : {0}' -f $small.Count))
+            foreach ($s in $small) { $lines.Add($s) }
+
             [System.IO.File]::WriteAllLines($log, $lines, (New-Object System.Text.UTF8Encoding($false)))
             $window.Close()
         })
@@ -1186,9 +1443,42 @@ if ($Sakura) {
     $window.Add_Closed({ $petalTimer.Stop() })
 }
 
+if ($Shot) {
+    <#
+      Measure, arrange, draw. The window is never shown, so nothing here depends on
+      a display, a session or a GPU presenter - which is the point: a UI change can
+      be looked at (and diffed against the last one) on a headless machine.
+    #>
+    $w = [double]$window.Width
+    $h = [double]$window.Height
+    $root.Measure([System.Windows.Size]::new($w, $h))
+    $root.Arrange([System.Windows.Rect]::new(0, 0, $w, $h))
+    $root.UpdateLayout()
+
+    $rtb = [System.Windows.Media.Imaging.RenderTargetBitmap]::new(
+        [int]$w, [int]$h, 96, 96, [System.Windows.Media.PixelFormats]::Pbgra32)
+    $rtb.Render($root)
+
+    $encoder = New-Object System.Windows.Media.Imaging.PngBitmapEncoder
+    $encoder.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($rtb))
+
+    $dir = Split-Path -Parent $Shot
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+        # CreateDirectory is a no-op on an existing path and does not throw on a
+        # drive root, where New-Item -ItemType Directory refuses outright.
+        [void][System.IO.Directory]::CreateDirectory($dir)
+    }
+    $stream = [System.IO.File]::Create($Shot)
+    try { $encoder.Save($stream) } finally { $stream.Dispose() }
+
+    Write-Output ('shot : {0}' -f (Resolve-Path -LiteralPath $Shot).Path)
+    Write-Output ('size : {0:N0} x {1:N0}' -f $w, $h)
+    exit 0
+}
+
 $window.Add_Closed({
         $toastTimer.Stop()
-        if (-not $NoUI -and -not $Diag) {
+        if (-not $headless) {
             # Tidy up the single-instance markers. A stale pid file is harmless
             # (Focus-RunningInstance just fails to find a window), but leaving it
             # around is untidy.

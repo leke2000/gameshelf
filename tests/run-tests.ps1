@@ -519,6 +519,493 @@ Test-Case 'launch map reads back an entry''s executable' {
     Assert-True ($null -eq (Get-GSLaunchExe -Shelf $shelf -EntryName 'Some Collection' -Target $sandbox)) 'FOLDER resolves to null'
 }
 
+# ---------------------------------------------------------------- ludusavi
+
+Write-Host ''
+Write-Host 'ludusavi bridge' -ForegroundColor White
+
+Test-Case 'process arguments are quoted the way Windows parses them' {
+    Assert-Equal 'plain' (ConvertTo-GSProcessArgument -Argument 'plain')
+    Assert-Equal '"two words"' (ConvertTo-GSProcessArgument -Argument 'two words')
+    # real titles look like this, and the star must survive as a literal
+    Assert-Equal '"Senren * Banka"' (ConvertTo-GSProcessArgument -Argument 'Senren * Banka')
+    # a quote is escaped with a backslash...
+    Assert-Equal '"a\"b"' (ConvertTo-GSProcessArgument -Argument 'a"b')
+    # ...and a trailing backslash is doubled so it cannot escape the closing quote
+    Assert-Equal '"C:\path with space\\"' (ConvertTo-GSProcessArgument -Argument 'C:\path with space\')
+    Assert-Equal '""' (ConvertTo-GSProcessArgument -Argument '')
+}
+
+Test-Case 'find output is parsed into titles and scores' {
+    $json = '{"games":{"Hollow Knight":{"score":1.0},"Hollow Knight Deluxe":{"score":0.42}}}'
+    $m = @(ConvertFrom-GSLudusaviFind -Json $json)
+    Assert-Equal 2 $m.Count
+    Assert-Equal 'Hollow Knight' $m[0].Title 'the best match must come first'
+    Assert-Equal 1.0 $m[0].Score
+    Assert-Equal 0.42 $m[1].Score
+}
+
+Test-Case 'empty or blank find output is not an error' {
+    $empty = @(ConvertFrom-GSLudusaviFind -Json '{"games":{}}')
+    $blank = @(ConvertFrom-GSLudusaviFind -Json '')
+    Assert-Equal 0 $empty.Count
+    Assert-Equal 0 $blank.Count
+}
+
+Test-Case 'a title ludusavi has never heard of is an answer, not a failure' {
+    # Verbatim from ludusavi 0.31.0 for a game it does not know: exit code 1, this
+    # on stdout, "No info for these games" on stderr. A shelf with doujin games on
+    # it is full of these, so the exit code alone cannot mean "something broke".
+    $json = '{"errors":{"unknownGames":["Akujo no Eikan"]},"games":{}}'
+    $unknown = @(Get-GSLudusaviUnknown -Json $json)
+    Assert-Equal 1 $unknown.Count
+    Assert-Equal 'Akujo no Eikan' $unknown[0]
+
+    $matches = @(ConvertFrom-GSLudusaviFind -Json $json)
+    Assert-Equal 0 $matches.Count 'no match, and that must not be read as one'
+
+    $none = @(Get-GSLudusaviUnknown -Json '{"games":{}}')
+    Assert-Equal 0 $none.Count 'a reply with no errors block names no unknown titles'
+    $none2 = @(Get-GSLudusaviUnknown -Json '')
+    Assert-Equal 0 $none2.Count
+}
+
+Test-Case 'preview output is parsed, ignored entries skipped' {
+    # Built with ConvertTo-Json rather than hand-written: save paths contain
+    # backslashes, which a JSON literal would need escaped.
+    $roam = $env:APPDATA
+    $payload = @{
+        games = @{
+            'Exact Game' = @{
+                files    = @{
+                    (Join-Path $roam 'ExactGame\slot1.sav') = @{ bytes = 10; ignored = $false }
+                    (Join-Path $roam 'ExactGame\slot2.sav') = @{ bytes = 20; ignored = $false }
+                    (Join-Path $roam 'ExactGame\bak\x.sav') = @{ bytes = 99; ignored = $true }
+                }
+                registry = @{ 'HKEY_CURRENT_USER/SOFTWARE/Exact' = @{} }
+            }
+        }
+    }
+    $p = @(ConvertFrom-GSLudusaviPreview -Json ($payload | ConvertTo-Json -Depth 8))
+    Assert-Equal 1 $p.Count
+    Assert-Equal 2 $p[0].Files 'the ignored file must not be counted'
+    Assert-Equal 30 $p[0].Bytes 'bytes of ignored files must not be counted'
+    Assert-Equal 1 @($p[0].Registry).Count
+    Assert-True (-not $p[0].Unknown)
+}
+
+Test-Case 'a title ludusavi does not know is reported, not dropped' {
+    $p = @(ConvertFrom-GSLudusaviPreview -Json '{"games":{},"errors":{"unknownGames":["Ghost Game"]}}')
+    Assert-Equal 1 $p.Count
+    Assert-True $p[0].Unknown
+    Assert-Equal 'Ghost Game' $p[0].Title
+    Assert-Equal 0 $p[0].Files
+}
+
+Test-Case 'sibling save files collapse onto their folder' {
+    $roam = $env:APPDATA
+    $c = @(Group-GSPathCluster -Paths @(
+            (Join-Path $roam 'GameA\slot1.sav'),
+            (Join-Path $roam 'GameA\slot2.sav'),
+            (Join-Path $roam 'GameA\deep\slot3.sav')
+        ) -Bytes @{ (Join-Path $roam 'GameA\slot1.sav') = 10 })
+    Assert-Equal 1 $c.Count
+    Assert-Equal (Join-Path $roam 'GameA') $c[0].Root
+    Assert-Equal 3 $c[0].Keys
+    Assert-Equal 10 $c[0].Bytes 'the size table is keyed case-insensitively'
+}
+
+Test-Case 'unrelated folders never collapse onto a token root' {
+    # The guard that matters: a map entry of bare %APPDATA% would back up the
+    # whole roaming profile.
+    $roam = $env:APPDATA
+    $c = @(Group-GSPathCluster -Paths @(
+            (Join-Path $roam 'GameA\x.sav'),
+            (Join-Path $roam 'GameB\y.sav')
+        ))
+    Assert-Equal 2 $c.Count
+    Assert-Equal (Join-Path $roam 'GameA\x.sav') $c[0].Root
+    Assert-True (-not (Test-GSPathIsSpecific -Path $roam)) 'a bare token root is not specific enough'
+    Assert-True (Test-GSPathIsSpecific -Path (Join-Path $roam 'GameA')) 'one level below it is'
+}
+
+Test-Case 'folders on one path merge, unrelated ones do not' {
+    $a = 'Q:\Saves\GameA'
+    $b = 'Q:\Saves\GameA\sub'
+    $c = 'Q:\Other\GameB'
+    Assert-Equal 'Q:\Saves\GameA' (Get-GSPathClusterRoot -A $a -B $b)
+    # only the drive is shared, and a cluster root of 'Q:\' is exactly what the
+    # specificity guard then refuses to merge
+    Assert-Equal 'Q:\' (Get-GSPathClusterRoot -A $a -B $c)
+    Assert-Equal 'Q:\' (Get-GSPathClusterRoot -A 'Q:\x.sav' -B 'Q:\y.sav')
+    # boundary aware: 'GameAB' is not inside 'GameA'
+    Assert-Equal $null (Get-GSRelativeTo -Child 'Q:\GameAB' -Ancestor 'Q:\GameA')
+}
+
+Test-Case 'absolute save paths are rewritten with map tokens' {
+    $roam = $env:APPDATA
+    Assert-Equal '%APPDATA%\Team Cherry\Hollow Knight' `
+        (ConvertTo-GSSaveMapPath -Absolute (Join-Path $roam 'Team Cherry\Hollow Knight'))
+    Assert-Equal '%LOCALLOW%\Studio\Game' `
+        (ConvertTo-GSSaveMapPath -Absolute (Join-Path $env:USERPROFILE 'AppData\LocalLow\Studio\Game'))
+    Assert-Equal 'GAME\saves' (ConvertTo-GSSaveMapPath -Absolute 'D:\Games\GameB\saves' -Target 'D:\Games\GameB')
+    Assert-Equal 'Q:\Elsewhere\saves' (ConvertTo-GSSaveMapPath -Absolute 'Q:\Elsewhere\saves' -Target 'D:\Games\GameB')
+}
+
+Test-Case 'proposals are decided from matches and previews' {
+    # The decision half of the bridge, exercised without Ludusavi installed.
+    $roam = $env:APPDATA
+    $payload = @{
+        games = @{
+            'Exact Game' = @{
+                files    = @{
+                    (Join-Path $roam 'ExactGame\slot1.sav') = @{ bytes = 10; ignored = $false }
+                    (Join-Path $roam 'ExactGame\slot2.sav') = @{ bytes = 20; ignored = $false }
+                }
+                registry = @{}
+            }
+        }
+    }
+    $preview = @{}
+    foreach ($pv in (ConvertFrom-GSLudusaviPreview -Json ($payload | ConvertTo-Json -Depth 8))) {
+        $preview[$pv.Title] = $pv
+    }
+
+    $entry = @(
+        [pscustomobject]@{ Name = 'Exact Game'; Target = 'D:\Games\Exact' }
+        [pscustomobject]@{ Name = 'Weak Match'; Target = 'D:\Games\Weak' }
+        [pscustomobject]@{ Name = 'Silent Preview'; Target = 'D:\Games\Silent' }
+        [pscustomobject]@{ Name = 'Truly Unknown'; Target = 'D:\Games\Unknown' }
+        [pscustomobject]@{ Name = 'No Match At All'; Target = 'D:\Games\None' }
+    )
+    $match = @{
+        'Exact Game'      = [pscustomobject]@{ Title = 'Exact Game'; Match = 'exact'; Score = 1.0; Candidates = 1 }
+        'Weak Match'      = [pscustomobject]@{ Title = 'Exact Game'; Match = 'fuzzy'; Score = 0.4; Candidates = 3 }
+        # find resolved a title the preview then said nothing about - ludusavi does
+        # this for titles containing non-ASCII characters
+        'Silent Preview'  = [pscustomobject]@{ Title = 'God of War Ragnar' + [char]246 + 'k'; Match = 'fuzzy'; Score = 0.92; Candidates = 1 }
+        # ...whereas this one the preview explicitly reported as unknown
+        'Truly Unknown'   = [pscustomobject]@{ Title = 'Ghost'; Match = 'fuzzy'; Score = 0.95; Candidates = 1 }
+    }
+    $preview['Ghost'] = [pscustomobject]@{
+        Title = 'Ghost'; Unknown = $true; Paths = @(); Sizes = @{}
+        Files = 0; Bytes = [long]0; Ignored = 0; Registry = @(); Decision = $null
+    }
+
+    $props = @(ConvertTo-GSLudusaviProposal -Entry $entry -Match $match -Preview $preview -MinScore 0.8)
+    Assert-Equal 5 $props.Count
+
+    Assert-True $props[0].Ok 'an exact match with paths is adoptable'
+    Assert-Equal '%APPDATA%\ExactGame' $props[0].Paths[0] 'and its path is tokenised'
+    Assert-Equal 1 $props[0].Clusters
+    Assert-Equal 2 $props[0].Files
+
+    Assert-True (-not $props[1].Ok) 'a weak fuzzy match is not adoptable'
+    Assert-True ($props[1].Reason -like 'below -MinScore*') "got: $($props[1].Reason)"
+
+    Assert-True (-not $props[2].Ok)
+    Assert-True (-not $props[2].Unknown) 'a title find resolved is not an unknown title'
+    Assert-True ($props[2].Reason -like 'ludusavi resolved no paths*') "got: $($props[2].Reason)"
+
+    Assert-True (-not $props[3].Ok)
+    Assert-True $props[3].Unknown 'a title the preview called unknown is flagged'
+    Assert-Equal 'ludusavi does not know this title' $props[3].Reason
+
+    Assert-True (-not $props[4].Ok)
+    Assert-Equal 'no ludusavi match' $props[4].Reason
+}
+
+Test-Case 'adopting appends to the save map instead of rewriting it' {
+    $tmp = Join-Path $sandbox 'adoptshelf'
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $mapFile = Join-Path $tmp '_saves.txt'
+    # a hand-written map: a comment of the user's own, and an entry they curated
+    @('# my own note about this map', 'Game A|GAME\save', '') |
+    Set-Content -LiteralPath $mapFile -Encoding UTF8
+
+    $n = Add-GSSaveMapEntry -Shelf $tmp -Entry @{
+        'Game A' = @('%APPDATA%\ShouldNotReplace')
+        'Game B' = @('%APPDATA%\GameB', 'GAME\save')
+    }
+    Assert-Equal 1 $n 'only the unmapped entry is appended'
+
+    $text = [System.IO.File]::ReadAllText($mapFile, [System.Text.Encoding]::UTF8)
+    Assert-True ($text -match 'my own note about this map') 'the user''s comment must survive'
+    $back = Import-GSSaveMap -Shelf $tmp
+    Assert-Equal 'GAME\save' ($back['Game A'] -join ';') 'the curated path must win'
+    Assert-Equal '%APPDATA%\GameB;GAME\save' ($back['Game B'] -join ';')
+}
+
+Test-Case 'title overrides are appended without disturbing existing ones' {
+    $tmp = Join-Path $sandbox 'adoptshelf'
+    @('# pinned by hand', 'Old Game|Old Title') |
+    Set-Content -LiteralPath (Join-Path $tmp '_ludusavi.txt') -Encoding UTF8
+
+    $n = Add-GSLudusaviMapEntry -Shelf $tmp -Map @{ 'Old Game' = 'Different'; '新游戏' = 'New Game' }
+    Assert-Equal 1 $n 'an entry already pinned must not be rewritten'
+    $m = Import-GSLudusaviMap -Shelf $tmp
+    Assert-Equal 2 $m.Keys.Count
+    Assert-Equal 'Old Title' $m['Old Game']
+    Assert-Equal 'New Game' $m['新游戏'] 'non-ASCII entry names must survive'
+}
+
+Test-Case 'appending keeps the file''s own line endings and BOM' {
+    # A real shelf map, curated in an editor that writes LF: rewriting it as CRLF
+    # turns one appended entry into a sixty-line diff, which is not what "adopt
+    # only ever adds" is supposed to mean.
+    $tmp = Join-Path $sandbox 'lfmap'
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $p = Join-Path $tmp '_saves.txt'
+    [System.IO.File]::WriteAllText($p, "# mine`nGame A|GAME\save`n", (New-Object System.Text.UTF8Encoding($false)))
+
+    Add-GSSaveMapEntry -Shelf $tmp -Entry @{ 'Game B' = @('%APPDATA%\B') } | Out-Null
+
+    $bytes = [System.IO.File]::ReadAllBytes($p)
+    $cr = 0
+    $bom = ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+    foreach ($b in $bytes) { if ($b -eq 13) { $cr++ } }
+    Assert-Equal 0 $cr 'an LF file must stay LF'
+    Assert-True (-not $bom) 'a file without a BOM must not gain one'
+
+    $back = Import-GSSaveMap -Shelf $tmp
+    Assert-Equal 2 $back.Keys.Count 'the new entry still lands'
+    Assert-Equal '%APPDATA%\B' $back['Game B'][0]
+
+    # and the other way round: a CRLF file stays CRLF
+    $tmp2 = Join-Path $sandbox 'crlfmap'
+    New-Item -ItemType Directory -Path $tmp2 -Force | Out-Null
+    $p2 = Join-Path $tmp2 '_saves.txt'
+    [System.IO.File]::WriteAllLines($p2, @('# mine', 'Game A|GAME\save'), (New-Object System.Text.UTF8Encoding($true)))
+    Add-GSSaveMapEntry -Shelf $tmp2 -Entry @{ 'Game B' = @('GAME\b') } | Out-Null
+    $text2 = [System.IO.File]::ReadAllText($p2)
+    Assert-True ($text2 -match "`r`n") 'a CRLF file must stay CRLF'
+}
+
+Test-Case 'a named ludusavi.exe that does not exist is an error' {
+    $threw = $false
+    try { Get-GSLudusaviExe -Exe (Join-Path $sandbox 'no-such-ludusavi.exe') } catch { $threw = $true }
+    Assert-True $threw 'a typo must not silently fall back to another binary'
+}
+
+Test-Case 'ludusavi is reported as optional when it is not installed' {
+    $fake = Join-Path $sandbox 'ludufake'
+    New-Item -ItemType Directory -Path $fake -Force | Out-Null
+    # A portable install keeps its config beside the exe; the marker file decides.
+    Set-Content -LiteralPath (Join-Path $fake 'ludusavi.portable') -Value 'x'
+    Set-Content -LiteralPath (Join-Path $fake 'ludusavi.exe') -Value 'not really an executable'
+    Set-Content -LiteralPath (Join-Path $fake 'manifest.yaml') -Value 'x'
+
+    $info = Test-GSLudusavi -Exe (Join-Path $fake 'ludusavi.exe') -TimeoutSec 5
+    Assert-True $info.Available
+    Assert-Equal (Join-Path $fake 'manifest.yaml') $info.ManifestPath 'the portable marker must redirect the app folder'
+    Assert-Equal 'ready' $info.Note
+}
+
+# ---------------------------------------------------------------- playnite
+
+Write-Host ''
+Write-Host 'playnite bridge' -ForegroundColor White
+
+$plGameDir = Join-Path $sandbox 'pl_games\ByPath'
+$plNameDir = Join-Path $sandbox 'pl_games\By Name Game'
+New-Item -ItemType Directory -Path $plGameDir -Force | Out-Null
+New-Item -ItemType Directory -Path $plNameDir -Force | Out-Null
+$plShelf = Join-Path $sandbox 'pl_shelf'
+$plManifest = Join-Path $sandbox 'pl.txt'
+@(
+    "Action|Renamed On Shelf|$plGameDir|"
+    "Action|By Name Game|$plNameDir|"
+) | Set-Content -LiteralPath $plManifest -Encoding UTF8
+New-GSShelf -Manifest $plManifest -Shelf $plShelf -Mode Link -Confirm:$false | Out-Null
+
+Test-Case 'the shipped extension manifest agrees with its folder' {
+    $src = Join-Path $repoRoot 'integrations\playnite\GameShelf'
+    $meta = Import-GSPlayniteExtensionManifest -Path (Join-Path $src 'extension.yaml')
+    Assert-Equal 'GameShelf' $meta['Id']
+    Assert-Equal 'Script' $meta['Type']
+    $module = $meta['Module']
+    Assert-True ($module -and (Test-Path -LiteralPath (Join-Path $src $module))) `
+        "Module names a file that must exist, got '$module'"
+    Assert-True ([bool]$meta['Version']) 'Version must be set'
+}
+
+Test-Case 'the extension installs into an extensions folder' {
+    $src = Join-Path $repoRoot 'integrations\playnite\GameShelf'
+    $root = Join-Path $sandbox 'playnite\Extensions'
+    $res = Install-GSPlayniteExtension -Source $src -Root $root -Confirm:$false
+    Assert-True $res.Installed
+    Assert-Equal 'GameShelf' $res.Id
+    Assert-True (Test-Path -LiteralPath (Join-Path $root 'GameShelf\extension.yaml'))
+    Assert-True (Test-Path -LiteralPath (Join-Path $root 'GameShelf\GameShelfExtension.psm1'))
+
+    # idempotent, but only with -Force
+    $threw = $false
+    try { Install-GSPlayniteExtension -Source $src -Root $root -Confirm:$false } catch { $threw = $true }
+    Assert-True $threw 'installing over itself needs -Force'
+    $again = Install-GSPlayniteExtension -Source $src -Root $root -Force -Confirm:$false
+    Assert-True $again.Installed
+}
+
+Test-Case 'installing over a different extension is refused' {
+    $root = Join-Path $sandbox 'playnite2\Extensions'
+    $dest = Join-Path $root 'GameShelf'
+    New-Item -ItemType Directory -Path $dest -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $dest 'extension.yaml') -Value 'Id: SomeOtherThing' -Encoding UTF8
+
+    $threw = $false
+    try {
+        Install-GSPlayniteExtension -Source (Join-Path $repoRoot 'integrations\playnite\GameShelf') -Root $root -Force -Confirm:$false
+    } catch { $threw = $true }
+    Assert-True $threw 'must refuse to replace a different extension'
+    Assert-True (Test-Path -LiteralPath (Join-Path $dest 'extension.yaml')) 'and must not have deleted it'
+}
+
+Test-Case 'the extension writes a library the CLI can read back' {
+    # The contract between the two halves, tested without Playnite: the writer is
+    # fed plain objects shaped like the SDK's Game, and the reader must understand
+    # what came out. This also pins down the single-game case, where PowerShell
+    # 5.1 unwraps a one-element JSON array into a bare object.
+    $mod = Join-Path $repoRoot 'integrations\playnite\GameShelf\GameShelfExtension.psm1'
+    Import-Module $mod -Force
+
+    $games = @(
+        [pscustomobject]@{
+            Id              = 'aaaa-bbbb'
+            Name            = 'Elden Ring'
+            InstallDirectory = 'D:\Games\ELDEN RING'
+            IsInstalled     = $true
+            Playtime          = 36000
+            PlayCount         = 12
+            LastActivity      = [datetime]'2026-09-20T21:00:00'
+            Added             = [datetime]'2026-01-02T10:00:00'
+            Categories        = @([pscustomobject]@{ Name = 'Action' })
+            Genres            = @([pscustomobject]@{ Name = 'RPG' })
+            Tags              = @()
+            Source            = [pscustomobject]@{ Name = 'Steam' }
+            Platforms         = @([pscustomobject]@{ Name = 'PC (Windows)' })
+            Hidden            = $false
+            Favorite          = $true
+        }
+    )
+
+    $out = Join-Path $sandbox 'playnite-library.json'
+    $res = Export-GSPLLibrary -Games $games -Path $out -PlayniteVersion '10.35'
+    Assert-Equal 1 $res.Count
+    Assert-True (Test-Path -LiteralPath $out) 'the export must be written'
+
+    $lib = Import-GSPlayniteLibrary -Path $out
+    Assert-Equal 1 $lib.Games.Count 'a one-game export must still arrive as a list'
+    Assert-Equal 'Elden Ring' $lib.Games[0].Name
+    Assert-Equal 'D:\Games\ELDEN RING' $lib.Games[0].InstallDir
+    Assert-Equal 36000 $lib.Games[0].PlaytimeSeconds
+    Assert-Equal 'Steam' $lib.Games[0].Source
+    Assert-Equal 'Action' $lib.Games[0].Categories[0]
+    Assert-True ($null -ne $lib.Games[0].LastActivityAt) 'the timestamp must parse'
+    Assert-Equal '10.35' $lib.PlayniteVersion
+}
+
+Test-Case 'an export from a newer schema is refused, not guessed at' {
+    $bad = Join-Path $sandbox 'newer.json'
+    '{"schema":"gameshelf.playnite.library/99","games":[]}' |
+    Set-Content -LiteralPath $bad -Encoding UTF8
+    $threw = $false
+    try { Import-GSPlayniteLibrary -Path $bad } catch { $threw = $true }
+    Assert-True $threw 'a newer schema must not be silently interpreted'
+
+    $notOurs = Join-Path $sandbox 'notours.json'
+    '{"games":[]}' | Set-Content -LiteralPath $notOurs -Encoding UTF8
+    $threw = $false
+    try { Import-GSPlayniteLibrary -Path $notOurs } catch { $threw = $true }
+    Assert-True $threw 'a file with no schema is not an export'
+}
+
+Test-Case 'a manifest is drafted from the library' {
+    $lib = Import-GSPlayniteLibrary -Path (Join-Path $sandbox 'playnite-library.json')
+    $items = @(New-GSPlayniteManifest -Games $lib.Games)
+    Assert-Equal 1 $items.Count
+    Assert-Equal 'Action' $items[0].Category
+    Assert-Equal 'Elden Ring' $items[0].Name
+    Assert-Equal 'D:\Games\ELDEN RING' $items[0].Target
+    Assert-True ($items[0].Note -like '*h played*') "the note should carry playtime, got: $($items[0].Note)"
+    Assert-True ($items[0].Note -like '*Steam*')
+    Assert-True ($items[0].Note -like '*folder missing*') 'the folder does not exist in the sandbox'
+}
+
+Test-Case 'games without an install folder are skipped' {
+    $games = @(
+        [pscustomobject]@{ Name = 'Not Installed'; InstallDir = ''; IsInstalled = $false; PlaytimeSeconds = 0; LastActivityAt = $null; Categories = @(); Genres = @(); Tags = @(); Source = ''; Hidden = $false }
+        [pscustomobject]@{ Name = 'Hidden One'; InstallDir = 'D:\g\h'; IsInstalled = $true; PlaytimeSeconds = 0; LastActivityAt = $null; Categories = @(); Genres = @(); Tags = @(); Source = ''; Hidden = $true }
+    )
+    $items = @(New-GSPlayniteManifest -Games $games)
+    Assert-Equal 0 $items.Count 'no target, nothing to build'
+}
+
+Test-Case 'category falls back to genres, then to Unsorted' {
+    $base = @{
+        InstallDir = 'D:\g\x'; IsInstalled = $true; PlaytimeSeconds = 0; LastActivityAt = $null
+        Tags = @(); Source = ''; Hidden = $false
+    }
+    $g = [pscustomobject]($base + @{ Name = 'G'; Categories = @(); Genres = @('RPG') })
+    $byGenre = @(New-GSPlayniteManifest -Games @($g) -CategorySource Genres)
+    $byDefault = @(New-GSPlayniteManifest -Games @($g))
+    Assert-Equal 'RPG' $byGenre[0].Category
+    Assert-Equal 'Unsorted' $byDefault[0].Category
+}
+
+Test-Case 'launcher-managed games are labelled and can be skipped' {
+    $g = [pscustomobject]@{
+        Name = 'Steam Game'; InstallDir = 'D:\g\s'; IsInstalled = $true; PlaytimeSeconds = 0
+        LastActivityAt = $null; Categories = @('Action'); Genres = @(); Tags = @(); Source = 'Steam'; Hidden = $false
+    }
+    $with = @(New-GSPlayniteManifest -Games @($g))
+    Assert-Equal 1 $with.Count
+    Assert-True ($with[0].Note -like '*launcher-managed*') "got: $($with[0].Note)"
+    $skipped = @(New-GSPlayniteManifest -Games @($g) -SkipLauncherManaged)
+    Assert-Equal 0 $skipped.Count
+}
+
+Test-Case 'a shelf is matched to the library by path, then by name' {
+    $games = @(
+        [pscustomobject]@{ Id = '1'; Name = 'Original Name'; InstallDir = $plGameDir; IsInstalled = $true; PlaytimeSeconds = 7200; LastActivityAt = $null; Source = 'Steam'; Hidden = $false }
+        [pscustomobject]@{ Id = '2'; Name = 'By Name Game'; InstallDir = ''; IsInstalled = $true; PlaytimeSeconds = 0; LastActivityAt = $null; Source = ''; Hidden = $false }
+    )
+    $m = Get-GSPlayniteMatch -Shelf $plShelf -Games $games
+    Assert-Equal 2 $m.Total
+    Assert-Equal 2 $m.Matched
+    Assert-Equal 'path' $m.OnShelf[0].MatchKind 'the folder identifies it even when the labels differ'
+    Assert-Equal 'name' $m.OnShelf[1].MatchKind
+    Assert-Equal 2.0 $m.OnShelf[0].Hours
+
+    # The result must be one object, not an array of them: List.Remove returns a
+    # bool, and leaking it here would make $m.Unmatched collapse to $null, i.e.
+    # @(...).Count would report a phantom unmatched game.
+    Assert-True (-not ($m -is [array])) "Get-GSPlayniteMatch must return a single object, got $($m.GetType().Name)"
+    $leftover = @($m.Unmatched)
+    Assert-Equal 0 $leftover.Count ("left over: " + (($leftover | ForEach-Object { $_.Name }) -join ', '))
+}
+
+Test-Case 'an entry can be addressed by the folder it points at' {
+    $data = Get-GSShelf -Shelf $plShelf -SkipSize
+    $byTarget = @(Select-GSShelfEntry -Items $data.Items -Target $plGameDir)
+    Assert-Equal 1 $byTarget.Count
+    Assert-Equal 'Renamed On Shelf' $byTarget[0].Name
+    $byName = @(Select-GSShelfEntry -Items $data.Items -Name 'By Name Game')
+    Assert-Equal 1 $byName.Count
+    $missing = @(Select-GSShelfEntry -Items $data.Items -Target 'Q:\nowhere')
+    Assert-Equal 0 $missing.Count
+}
+
+Test-Case 'the extension exports the functions Playnite calls' {
+    foreach ($fn in @('GetMainMenuItems', 'GetGameMenuItems',
+            'Invoke-GSPLExportLibrary', 'Invoke-GSPLOpenShelf',
+            'Invoke-GSPLBackupSaves', 'Invoke-GSPLShowSaves')) {
+        Assert-True ($null -ne (Get-Command $fn -ErrorAction SilentlyContinue)) "the extension must export $fn"
+    }
+    # and the module must be importable without Playnite present, or nothing above
+    # could be tested at all
+    Assert-True ($null -ne (Get-Command 'Export-GSPLLibrary' -ErrorAction SilentlyContinue))
+}
+
 # ---------------------------------------------------------------- env
 
 Write-Host ''

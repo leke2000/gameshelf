@@ -1,0 +1,11 @@
+Id: GameShelf
+Name: GameShelf
+Author: leke2000
+Version: 1.0.0
+Module: GameShelfExtension.psm1
+Type: Script
+Links:
+  - Name: GameShelf
+    Url: https://github.com/leke2000/gameshelf
+  - Name: Extension guide
+    Url: https://github.com/leke2000/gameshelf/tree/main/integrations/playnite

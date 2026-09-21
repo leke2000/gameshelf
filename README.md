@@ -35,7 +35,9 @@ H:\Games\                     <- 0 bytes, nothing moved
 | **GameShelf** (this folder) | Builds and maintains the shelf — a categorised tree of junctions. CLI. |
 | **[GameShelf Launcher](launcher/)** | An Xbox-style window onto that shelf: hero banner, tiled categories, one click to play. |
 
-The CLI also backs up and restores game saves — see [Save data](#save-data).
+The CLI also backs up and restores game saves — see [Save data](#save-data) — and
+can take its save locations from [Ludusavi](#ludusavi) and its game list from
+[Playnite](#playnite).
 
 ```
 launcher\install.ps1 -ShelfPath H:\Games
@@ -97,6 +99,8 @@ prints *why* each folder was detected, so you review before anything is built.
 | `verify` | Check every entry exists, is a junction, and is readable |
 | `index` | Regenerate `CATALOG.md` and `index.csv` |
 | `remove` | Take entries off the shelf (`-All`, `-Name`, `-Category`) |
+| `adopt` | Ask Ludusavi where the unmapped games keep their saves, and record it |
+| `playnite` | Read Playnite's library export: draft a manifest, or compare with the shelf |
 
 Every command supports `-WhatIf` and `-Verbose`.
 
@@ -165,6 +169,14 @@ hint.
 .\gameshelf.ps1 restore -Shelf H:\Games -Name Elden Ring [-Backup <id>]
 ```
 
+Every one of those also takes `-Target <folder>`, which addresses an entry by the
+folder it points at instead of by its label on the shelf. A launcher knows the
+folder and not the label, which is why it exists:
+
+```powershell
+.\gameshelf.ps1 backup -Shelf H:\Games -Target 'D:\SteamLibrary\...\ELDEN RING'
+```
+
 The map is `<shelf>\_saves.txt`:
 
 ```
@@ -195,6 +207,91 @@ the executable's company and product metadata and its own file name (Unreal name
 its user folder after the project, which is the executable). On one real 63-game
 shelf that found something for 44 of them — useful, but it also produced misses
 and false positives, which is why the curated map exists.
+
+## Ludusavi
+
+[Ludusavi](https://github.com/mtkennerly/ludusavi) keeps a curated manifest of save
+locations for 19,000+ games, compiled from PCGamingWiki. The section above ends on
+"44 of 63, useful but imperfect"; this replaces that guesswork with data.
+
+```powershell
+.\gameshelf.ps1 saves -Shelf H:\Games -Ludusavi   # what Ludusavi knows. writes nothing
+.\gameshelf.ps1 adopt -Shelf H:\Games -All        # write it into the save map
+.\gameshelf.ps1 adopt -Shelf H:\Games -Name '千恋万花' -Title 'Senren * Banka'
+```
+
+Ludusavi is *asked* rather than its manifest parsed: GameShelf runs
+`ludusavi backup --preview --api`, which resolves placeholders, globs, store user
+ids and registry keys exactly as a real backup would and answers in JSON. Nothing
+is backed up. `--no-manifest-update` is passed by default, so a first run reports
+that the manifest is missing instead of quietly downloading 17 MB.
+
+The reply lists files, which is the wrong shape for a save map, so they are
+collapsed onto the smallest set of folders that covers them and rewritten with the
+tokens the map already uses (`%APPDATA%\…`, `GAME\saves`). Two games whose saves
+live in unrelated subfolders of `%APPDATA%` are kept apart rather than merged into
+a `%APPDATA%` entry, which would mean backing up the whole roaming profile.
+
+Adopting only ever adds. An entry already in `_saves.txt` is never touched and the
+file is appended to rather than rewritten, so comments you left in it survive. When
+a shelf label is not the game's title, pin it once in `_ludusavi.txt`:
+
+```
+# <shelf entry name>|<ludusavi title>
+千恋万花|Senren * Banka
+```
+
+That map is consulted first; otherwise the best fuzzy match is used, and a match
+below `-MinScore` (default 0.8) is reported but not adopted. Registry keys Ludusavi
+also covers are counted and said out loud — GameShelf backs up files only.
+
+Ludusavi only answers for games it can work out paths for. One it cannot locate —
+an archive copy, a repack, a portable build sitting in a folder nobody told it
+about — or one whose manifest entry defines no save files at all comes back with no
+paths, and `adopt` says `resolved no paths for '<title>'` rather than inventing
+something. On the shelf this was tested against, one of eight unmapped entries
+could be resolved; the rest were archived or repacked copies. `-Title` does not
+help there, because the title was already right.
+
+Needs `ludusavi.exe`: put it on `PATH`, or pass `-LudusaviExe <path>` / set
+`$env:LUDUSAVI_EXE`. `doctor` reports what it finds.
+
+## Playnite
+
+[Playnite](https://playnite.link) already knows what is installed, where, how long
+it has been played and how you sorted it. The extension in
+[`integrations/playnite/`](integrations/playnite/) exports that library; the CLI
+reads the export.
+
+```powershell
+.\gameshelf.ps1 playnite -Install           # copy the extension into Playnite
+# restart Playnite, then: Extensions > GameShelf > Export library
+.\gameshelf.ps1 playnite -Out draft.txt     # draft a shelf manifest from the library
+.\gameshelf.ps1 playnite -Shelf H:\Games    # the shelf vs what Playnite has
+```
+
+`-Out` drafts a manifest of the same shape `scan` produces, except the categories
+are your own Playnite categories (falling back to genres), the note carries
+playtime, last-played and store, and nothing had to be guessed by walking drives.
+`-Shelf` reports both directions: shelf entries Playnite does not know, and
+installed games that are not on the shelf yet.
+
+Matching is on the install path first — a shelf entry's target is literally the
+folder Playnite launches from — and on the name second, which is reported
+separately because a shelf label can be a rename. Games from a launcher store
+(Steam, Epic, GOG, Xbox, …) are labelled, since the warning about launcher-managed
+libraries applies to them; `-SkipLauncherManaged` leaves them out.
+
+The extension also adds two entries to Playnite's game menu — back up this game's
+saves, show its save locations — and those address the shelf with `-Target`, so
+they work whatever the shelf calls the game.
+
+The seam is a JSON file rather than a reading of Playnite's database on purpose:
+`games.db` is LiteDB, its maintainer asks third-party tools not to read it
+("If you want to access game library data, you need to make a plugin for
+Playnite"), and the format is due to change. It also keeps the extension thin
+enough to port — Playnite 11 drops PowerShell script extensions, and only the
+export writer would have to move.
 
 ## Manifest format
 
@@ -268,7 +365,11 @@ powershell -ExecutionPolicy Bypass -File tests\run-tests.ps1
 
 32 cases covering manifest round-trips (including non-ASCII), junction safety,
 detection heuristics, the full build/list/verify/index/remove lifecycle, merge
-vs. replace semantics, and the guarantee that removal never touches data.
+vs. replace semantics, and the guarantee that removal never touches data —
+plus the save-data suite and the integration suite: argument quoting, the JSON
+shapes the Ludusavi CLI answers with, path clustering and its specificity guard,
+the append-only map writers, the Playnite export round-trip, and matching a shelf
+against a library by path and by name. 73 in total.
 
 ## Notes on writing PowerShell for this project
 
@@ -338,6 +439,8 @@ launcher\install.ps1 -ShelfPath H:\Games
 | `verify` | 逐个校验条目是否存在、是否为联接、是否可读取 |
 | `index` | 重新生成 `CATALOG.md` 和 `index.csv` |
 | `remove` | 取下条目（`-All` / `-Name` / `-Category`） |
+| `adopt` | 让 Ludusavi 指出未映射游戏的存档位置并记录下来 |
+| `playnite` | 读取 Playnite 的游戏库导出：生成清单，或与文件架对照 |
 
 所有命令都支持 `-WhatIf` 和 `-Verbose`。
 
@@ -353,6 +456,13 @@ launcher\install.ps1 -ShelfPath H:\Games
 .\gameshelf.ps1 backup  -Shelf H:\Games -Name 艾尔登法环
 .\gameshelf.ps1 backups -Shelf H:\Games              # 列出已有备份
 .\gameshelf.ps1 restore -Shelf H:\Games -Name 艾尔登法环 [-Backup <id>]
+```
+
+这几条命令都支持 `-Target <文件夹>`：用条目指向的真实目录来定位它，而不是用文件架上的
+名字。启动器只知道目录、不知道你给它起的名字，这个参数就是为这种场景准备的：
+
+```powershell
+.\gameshelf.ps1 backup -Shelf H:\Games -Target 'D:\SteamLibrary\...\ELDEN RING'
 ```
 
 映射表是 `<文件架>\_saves.txt`：
@@ -380,6 +490,79 @@ Elden Ring|%APPDATA%\EldenRing
 公司名/产品名和 exe 自身文件名去探测常见的用户目录（虚幻引擎的用户目录就是用项目名，
 也就是 exe 名）。在一份真实的 63 游戏文件架上，这样能对 44 个找到线索——有用，但既有漏
 也有误报，所以最终仍然依赖手工核对的映射表。
+
+## Ludusavi
+
+[Ludusavi](https://github.com/mtkennerly/ludusavi) 维护着一份从 PCGamingWiki 整理的
+存档位置清单，覆盖 19000 多款游戏。上一节说「63 个里能猜到 44 个，有用但不完善」，
+这一节就是用数据替掉那部分猜测。
+
+```powershell
+.\gameshelf.ps1 saves -Shelf H:\Games -Ludusavi   # 看 Ludusavi 知道什么，不写任何文件
+.\gameshelf.ps1 adopt -Shelf H:\Games -All        # 写进存档映射表
+.\gameshelf.ps1 adopt -Shelf H:\Games -Name '千恋万花' -Title 'Senren * Banka'
+```
+
+这里不是去解析 Ludusavi 的清单文件，而是**直接问它**：GameShelf 调用
+`ludusavi backup --preview --api`，由 Ludusavi 按真实备份的方式展开占位符、通配符、
+商店用户 ID 和注册表项，再用 JSON 回话；全程不会真的备份。默认会附加
+`--no-manifest-update`，所以第一次运行时它会老实告诉你清单还没缓存，而不是偷偷下载 17MB。
+
+返回的是一堆文件路径，这对存档映射表来说形状不对，所以会先聚合成「能覆盖它们的最小目录
+集合」，再改写成映射表本来的记号（`%APPDATA%\…`、`GAME\saves`）。两款游戏的存档如果分别
+在 `%APPDATA%` 下互不相干的子目录里，它们会各自成条，而不会被合并成一条 `%APPDATA%`
+——那等于把整个漫游配置目录都备份了。
+
+采纳只做加法：`_saves.txt` 里已有的条目绝不改动，文件是**追加**而不是重写，所以你手写的
+注释会保留。文件架上的名字和游戏标题对不上时（比如「千恋万花」对「Senren * Banka」），
+在 `_ludusavi.txt` 里钉一次即可：
+
+```
+# <文件架条目名>|<ludusavi 标题>
+千恋万花|Senren * Banka
+```
+
+这张对照表优先于模糊匹配；模糊匹配低于 `-MinScore`（默认 0.8）的会被报出来但不会采纳。
+Ludusavi 同时覆盖的注册表项会被统计并明确说明——GameShelf 只备份文件。
+
+Ludusavi 只为它能算出路径的游戏作答。它定位不到的游戏——归档留存版、重打包版、放在它
+不知道的目录里的便携版——以及清单条目里压根没定义存档文件的游戏，都会返回空路径，
+`adopt` 会如实写「resolved no paths for '<标题>'」，而不是凭空造一条。在实测的那份文件架上，
+8 个未映射条目里只有 1 个能解析出来，其余都是归档或重打包的副本。这种情况 `-Title`
+也帮不上忙，因为标题本来就是对的。
+
+需要 `ludusavi.exe`：放进 `PATH`，或用 `-LudusaviExe <路径>` / `$env:LUDUSAVI_EXE` 指定。
+`doctor` 会检查并报告。
+
+## Playnite
+
+[Playnite](https://playnite.link) 本来就知道装了哪些游戏、装在哪、玩了多久、怎么分类的。
+[`integrations/playnite/`](integrations/playnite/) 里的扩展负责把游戏库导出，命令行这边
+负责读。
+
+```powershell
+.\gameshelf.ps1 playnite -Install           # 把扩展装进 Playnite
+# 重启 Playnite，然后：扩展 > GameShelf > Export library
+.\gameshelf.ps1 playnite -Out draft.txt     # 用游戏库生成清单草稿
+.\gameshelf.ps1 playnite -Shelf H:\Games    # 文件架与 Playnite 互相对照
+```
+
+`-Out` 产出的清单和 `scan` 的形状一样，区别在于：分类直接用你在 Playnite 里分的类
+（没有则退回类型），备注里带游玩时长、最近游玩和来源平台，而且完全不需要扫盘去猜。
+`-Shelf` 会双向报告：Playnite 不认识的条目，以及已安装但还没上架的游戏。
+
+匹配先看安装目录（文件架条目的目标就是 Playnite 启动游戏用的那个目录），再看名字；
+名字匹配会单独标注，因为文件架上的名字可能是改过的。来自商店启动器（Steam、Epic、GOG、
+Xbox 等）的游戏会被标注出来，因为 README 里关于「启动器管理的游戏库」的提醒对它们适用；
+`-SkipLauncherManaged` 可以把它们排除在外。
+
+扩展还会在 Playnite 的游戏右键菜单里加两项——备份这款游戏的存档、查看它的存档位置——
+它们用 `-Target` 定位文件架条目，所以无论你在文件架上叫它什么名字都能用。
+
+两边之间的交接文件是 JSON，而不是直接读 Playnite 的数据库，这是有意的：`games.db` 是
+LiteDB 格式，作者明确请求第三方工具不要直接读（"If you want to access game library data,
+you need to make a plugin for Playnite"），而且这个格式即将变动。这样做也让扩展足够薄、
+便于迁移——Playnite 11 会移除 PowerShell 脚本扩展，到时候只需要把导出那部分改写掉。
 
 ## 清单格式
 
@@ -444,7 +627,9 @@ powershell -ExecutionPolicy Bypass -File tests\run-tests.ps1
 
 32 个用例，覆盖清单读写（含中日文非 ASCII 名称）、联接安全、识别启发式、
 build/list/verify/index/remove 全流程、合并与替换语义，以及「取下条目绝不碰
-数据」这条保证。
+数据」这条保证；再加上存档与集成两部分：参数引用、Ludusavi CLI 的 JSON 结构、
+路径聚类及其「不许塌缩到根目录」的安全线、只追加的映射表写入、Playnite 导出的往返，
+以及按目录和按名字匹配文件架。合计 73 个。
 
 ## 许可
 

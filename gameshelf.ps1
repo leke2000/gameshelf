@@ -24,7 +24,7 @@
 param(
     [Parameter(Position = 0, Mandatory)]
     [ValidateSet('doctor', 'scan', 'build', 'list', 'verify', 'index', 'remove',
-        'saves', 'backup', 'backups', 'restore', 'help')]
+        'saves', 'backup', 'backups', 'restore', 'adopt', 'playnite', 'help')]
     [string]$Command,
 
     # scan
@@ -51,7 +51,26 @@ param(
     # save data
     [string]$Store,
     [int]$Keep = 10,
-    [string]$Backup
+    [string]$Backup,
+
+    # ... and addressing an entry by the folder it points at, which is all a
+    # launcher such as Playnite has to hand
+    [string]$Target,
+
+    # ludusavi / adopt
+    [switch]$Ludusavi,
+    [string]$LudusaviExe,
+    [string]$Title,
+    [double]$MinScore = 0.8,
+    [switch]$UpdateManifest,
+
+    # playnite
+    [string]$File,
+    [switch]$Install,
+    [string]$PlayniteRoot,
+    [ValidateSet('Categories', 'Genres', 'Tags')][string]$CategorySource = 'Categories',
+    [switch]$OnlyInstalled,
+    [switch]$SkipLauncherManaged
 )
 
 $ErrorActionPreference = 'Stop'
@@ -73,6 +92,72 @@ function Format-GSSize([long]$Bytes) {
     if ($Bytes -ge 1MB) { return ('{0:N1} MB' -f ($Bytes / 1MB)) }
     if ($Bytes -ge 1KB) { return ('{0:N0} KB' -f ($Bytes / 1KB)) }
     return "$Bytes B"
+}
+
+function Write-GSLudusaviProposal([object]$Proposal, [switch]$RawPaths) {
+    <#
+      One Ludusavi proposal, in the two shapes the two callers want: 'saves' shows
+      what is on disk right now, 'adopt' shows exactly what would be written to the
+      map. Same header either way, so the two views read as one feature.
+    #>
+    if (-not $Proposal.Ok) {
+        $why = $Proposal.Reason
+        if (-not $why) { $why = 'no usable paths' }
+        if ($Proposal.Title -and $Proposal.Match -eq 'fuzzy') {
+            $why = $why + '  (best: "' + $Proposal.Title + '" ' + ('{0:N2}' -f $Proposal.Score) + ')'
+        }
+        Write-Host ("  {0,-30} {1}" -f $Proposal.Entry, $why) -ForegroundColor DarkYellow
+        return
+    }
+
+    $how = $Proposal.Match
+    if ($Proposal.Match -eq 'fuzzy') { $how = 'fuzzy ' + ('{0:N2}' -f $Proposal.Score) }
+    Write-Host ("  {0,-30} {1}" -f $Proposal.Entry, ('-> "' + $Proposal.Title + '"   ' + $how)) -ForegroundColor White
+
+    if ($RawPaths) {
+        foreach ($path in $Proposal.Paths) { Write-Host ('      ' + $path) -ForegroundColor Gray }
+        $bits = New-Object System.Collections.Generic.List[string]
+        if ($Proposal.Files -gt 0) { $bits.Add(('{0} file(s)' -f $Proposal.Files)) }
+        if ($Proposal.Bytes -gt 0) { $bits.Add((Format-GSSize $Proposal.Bytes)) }
+        if ($bits.Count -gt 0) { Write-Info (($bits -join ', ') + ' as Ludusavi counts them') }
+    } else {
+        foreach ($t in (Get-GSSaveTarget -Target $Proposal.Target -RawPaths $Proposal.Paths)) {
+            if ($t.Exists) {
+                $st = Get-GSFileStat -Path $t.Path
+                Write-Host ("      [ok]      {0,10}  {1,6} files  {2}" -f `
+                        (Format-GSSize $st.Bytes), $st.Files, $t.Path) -ForegroundColor Green
+            } else {
+                Write-Host ("      [missing]                        " + $t.Path) -ForegroundColor DarkGray
+            }
+        }
+    }
+
+    if ($Proposal.Dropped -gt 0) { Write-Info ("+ $($Proposal.Dropped) more location(s), not shown") }
+    if ($Proposal.Registry -gt 0) {
+        Write-Info ("Ludusavi also lists $($Proposal.Registry) registry key(s); GameShelf backs up files only")
+    }
+}
+
+function Write-GSPlayniteSettingsTemplate([string]$Cli) {
+    <#
+      The Playnite extension reads shelf + cli from this file. Written here rather
+      than left to the extension's own template because the CLI knows its real
+      path, and a first run that already has the right cli in it removes the step
+      people actually get stuck on. Never overwrites an existing file.
+    #>
+    if (-not $env:APPDATA) { return $null }
+    $dir = Join-Path $env:APPDATA 'GameShelf'
+    $path = Join-Path $dir 'playnite-extension.json'
+    if (Test-Path -LiteralPath $path) { return $path }
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $template = [ordered]@{
+        _comment = 'shelf = the folder GameShelf built. cli is filled in already; change it if you move the checkout.'
+        cli      = $Cli
+        shelf    = 'H:\Games'
+    }
+    [System.IO.File]::WriteAllText($path, ($template | ConvertTo-Json -Depth 4),
+        (New-Object System.Text.UTF8Encoding($false)))
+    return $path
 }
 
 switch ($Command) {
@@ -98,11 +183,29 @@ switch ($Command) {
         Write-Host '  Save data'
         Write-Host '    saves   -Shelf <folder>       Show save locations, with candidates for'
         Write-Host '                                  games that are not mapped yet. [-Name <game>]'
+        Write-Host '                                  [-Target <folder>] [-Ludusavi]'
         Write-Host '    backup  -Shelf <folder>       Copy saves into the backup store.'
-        Write-Host '            -All | -Name <game>   [-Store <folder>] [-Keep 10]'
+        Write-Host '            -All | -Name <game>   [-Store <folder>] [-Keep 10] [-Target <folder>]'
         Write-Host '    backups -Shelf <folder>       List stored backups. [-Name <game>]'
+        Write-Host '                                 [-Target <folder>]'
         Write-Host '    restore -Shelf <folder>       Put a backup back. [-Backup <id>] [-Force]'
         Write-Host '            -Name <game>          The live saves are kept aside first.'
+        Write-Host ''
+        Write-Host '  Ludusavi (https://github.com/mtkennerly/ludusavi)'
+        Write-Host '    adopt   -Shelf <folder>       Ask Ludusavi where the unmapped games keep'
+        Write-Host '            -All | -Name <game>   their saves and write those paths into the map.'
+        Write-Host '            [-Title <ludusavi title>]   pin the title when names differ'
+        Write-Host '            [-MinScore 0.8] [-LudusaviExe <exe>] [-UpdateManifest]'
+        Write-Host '    saves -Ludusavi               Same proposals, without writing anything.'
+        Write-Host ''
+        Write-Host '  Playnite (https://playnite.link)'
+        Write-Host '    playnite [-File <json>]       Read the library the Playnite extension'
+        Write-Host '            [-Out draft.txt]      exports: draft a manifest, or with'
+        Write-Host '            [-Shelf <folder>]     -Shelf, line the shelf up against it.'
+        Write-Host '            [-CategorySource Categories|Genres|Tags]'
+        Write-Host '            [-OnlyInstalled] [-SkipLauncherManaged]'
+        Write-Host '    playnite -Install             Put the bundled extension into Playnite.'
+        Write-Host '            [-PlayniteRoot <dir>] [-Force]'
         Write-Host ''
         Write-Host '  Always available: -WhatIf -Verbose'
         Write-Host ''
@@ -118,6 +221,45 @@ switch ($Command) {
             if ($c.Ok) { Write-Ok ("{0,-22} {1}" -f $c.Check, $c.Detail) }
             else { Write-Bad ("{0,-22} {1}" -f $c.Check, $c.Detail); $bad++ }
         }
+
+        # Optional integrations. Absent is the normal case and is not a failure -
+        # only a -LudusaviExe the user named themselves counts against the run,
+        # because that one is a typo rather than a choice.
+        $lud = $null
+        try {
+            $lud = Test-GSLudusavi -Exe $LudusaviExe
+        } catch {
+            Write-Bad ("{0,-22} {1}" -f 'Ludusavi', $_.Exception.Message)
+            $bad++
+        }
+        if ($null -ne $lud) {
+            if ($lud.Available) {
+                $version = $lud.Version
+                if (-not $version) { $version = 'ludusavi' }
+                Write-Ok ("{0,-22} {1}" -f 'Ludusavi', "$version - $($lud.Note)")
+                if ($lud.ManifestPath) { Write-Info ("manifest  " + $lud.ManifestPath) }
+            } else {
+                Write-Host ("  [--]   {0,-22} {1}" -f 'Ludusavi', $lud.Note) -ForegroundColor DarkGray
+            }
+        }
+
+        $export = Get-GSPlayniteExportPath -File $File
+        if ($export -and (Test-Path -LiteralPath $export -PathType Leaf)) {
+            $age = ((Get-Date) - (Get-Item -LiteralPath $export).LastWriteTime)
+            $stamp = '{0:N1}h' -f $age.TotalHours
+            if ($age.TotalDays -ge 1) { $stamp = '{0:N1}d' -f $age.TotalDays }
+            try {
+                $lib = Import-GSPlayniteLibrary -Path $export
+                Write-Ok ("{0,-22} {1}" -f 'Playnite export', "$($lib.Games.Count) game(s), written $stamp ago")
+                Write-Info ("export    " + $lib.Path)
+            } catch {
+                Write-Bad ("{0,-22} {1}" -f 'Playnite export', $_.Exception.Message)
+            }
+        } else {
+            Write-Host ("  [--]   {0,-22} {1}" -f 'Playnite', 'no library export yet (optional)') -ForegroundColor DarkGray
+            Write-Info 'gameshelf.ps1 playnite -Install    then export from Playnite''s main menu'
+        }
+
         Write-Host ''
         if ($bad -eq 0) { Write-Host '  Ready. You can build a Link shelf.' -ForegroundColor Green }
         else { Write-Host "  $bad check(s) failed." -ForegroundColor Red }
@@ -292,10 +434,17 @@ switch ($Command) {
         $storePath = Get-GSSaveStore -Shelf $Shelf -Store $Store
 
         $items = @($shelfData.Items)
-        if ($Name) { $items = @($items | Where-Object { $_.Name -eq $Name }) }
-        if ($items.Count -eq 0) { throw "No entry named '$Name'." }
+        if ($Name -or $Target) {
+            $items = @(Select-GSShelfEntry -Items $shelfData.Items -Name $Name -Target $Target)
+            if ($items.Count -eq 0) {
+                $what = "named '$Name'"
+                if ($Target) { $what = "pointing at '$Target'" }
+                throw "No shelf entry $what."
+            }
+        }
 
         $mapped = 0; $candidates = 0; $nothing = 0
+        $unmapped = New-Object System.Collections.Generic.List[object]
         Write-Host ''
         foreach ($e in $items) {
             $hasMap = $map.ContainsKey($e.Name)
@@ -312,6 +461,7 @@ switch ($Command) {
                     }
                 }
             } else {
+                $unmapped.Add($e)
                 $exe = Get-GSLaunchExe -Shelf $Shelf -EntryName $e.Name -Target $e.Target
                 $found = @(Find-GSSaveCandidate -EntryName $e.Name -Target $e.Target -ExePath $exe)
                 if ($found.Count -gt 0) {
@@ -333,12 +483,44 @@ switch ($Command) {
                 $mapped, $candidates, $nothing) -ForegroundColor Cyan
         Write-Info ("map   : " + (Get-GSSaveMapPath -Shelf $Shelf))
         Write-Info ("store : " + $storePath)
+
+        if ($Ludusavi) {
+            if ($unmapped.Count -eq 0) {
+                Write-Host ''
+                Write-Info 'Nothing to look up: every entry shown is already mapped.'
+            } else {
+                $ludExe = Get-GSLudusaviExe -Exe $LudusaviExe
+                if (-not $ludExe) {
+                    throw 'Ludusavi not found. Install it, or point at it with -LudusaviExe <path to ludusavi.exe>.'
+                }
+                $info = Test-GSLudusavi -Exe $ludExe
+                $ludMap = Import-GSLudusaviMap -Shelf $Shelf
+                # The probe only looks for a cached manifest, and with -UpdateManifest
+                # the first query is about to fetch one. Saying "none cached" and then
+                # fetching it reads like a failure; say what is about to happen.
+                $ludNote = $info.Note
+                if ($UpdateManifest -and -not $info.ManifestPath) {
+                    $ludNote = 'no manifest cached; -UpdateManifest fetches it with the first query'
+                }
+                Write-Host ''
+                Write-Host ("  Ludusavi - " + $ludNote) -ForegroundColor Cyan
+                $props = @(Get-GSLudusaviProposal -Entry $unmapped -Exe $ludExe -Titles $ludMap `
+                        -MinScore $MinScore -AllowManifestUpdate:$UpdateManifest -Progress {
+                            param($who, $what)
+                            if ($who) { Write-Verbose "ludusavi: $who - $what" } elseif ($what) { Write-Verbose "ludusavi: $what" }
+                        })
+                foreach ($p in $props) { Write-GSLudusaviProposal -Proposal $p }
+                Write-Host ''
+                Write-Info 'Nothing was written. adopt -All (or -Name <game>) puts these in the save map.'
+                if ($ludMap.Count -gt 0) { Write-Info ("titles: " + (Get-GSLudusaviMapPath -Shelf $Shelf)) }
+            }
+        }
         Write-Host ''
     }
 
     'backup' {
         if (-not $Shelf) { throw 'backup needs -Shelf' }
-        if (-not $All -and -not $Name) { throw 'backup needs -All or -Name' }
+        if (-not $All -and -not $Name -and -not $Target) { throw 'backup needs -All, -Name or -Target' }
 
         $shelfData = Get-GSShelf -Shelf $Shelf -SkipSize
         $map = Import-GSSaveMap -Shelf $Shelf
@@ -346,8 +528,14 @@ switch ($Command) {
         $storePath = Get-GSSaveStore -Shelf $Shelf -Store $Store
 
         $items = @($shelfData.Items)
-        if ($Name) { $items = @($items | Where-Object { $_.Name -eq $Name }) }
-        if ($items.Count -eq 0) { throw "No entry named '$Name'." }
+        if ($Name -or $Target) {
+            $items = @(Select-GSShelfEntry -Items $shelfData.Items -Name $Name -Target $Target)
+            if ($items.Count -eq 0) {
+                $what = "named '$Name'"
+                if ($Target) { $what = "pointing at '$Target'" }
+                throw "No shelf entry $what."
+            }
+        }
 
         $done = 0; $skipped = 0; $failed = 0
         $totalBytes = [long]0; $totalFiles = 0
@@ -383,7 +571,14 @@ switch ($Command) {
         $storePath = Get-GSSaveStore -Shelf $Shelf -Store $Store
 
         $items = @($shelfData.Items)
-        if ($Name) { $items = @($items | Where-Object { $_.Name -eq $Name }) }
+        if ($Name -or $Target) {
+            $items = @(Select-GSShelfEntry -Items $shelfData.Items -Name $Name -Target $Target)
+            if ($items.Count -eq 0) {
+                $what = "named '$Name'"
+                if ($Target) { $what = "pointing at '$Target'" }
+                throw "No shelf entry $what."
+            }
+        }
 
         $any = $false
         Write-Host ''
@@ -407,14 +602,18 @@ switch ($Command) {
 
     'restore' {
         if (-not $Shelf) { throw 'restore needs -Shelf' }
-        if (-not $Name) { throw 'restore needs -Name' }
+        if (-not $Name -and -not $Target) { throw 'restore needs -Name or -Target' }
 
         $shelfData = Get-GSShelf -Shelf $Shelf -SkipSize
         $map = Import-GSSaveMap -Shelf $Shelf
         $storePath = Get-GSSaveStore -Shelf $Shelf -Store $Store
 
-        $e = @($shelfData.Items | Where-Object { $_.Name -eq $Name }) | Select-Object -First 1
-        if (-not $e) { throw "No entry named '$Name'." }
+        $e = @(Select-GSShelfEntry -Items $shelfData.Items -Name $Name -Target $Target) | Select-Object -First 1
+        if (-not $e) {
+            $what = "named '$Name'"
+            if ($Target) { $what = "pointing at '$Target'" }
+            throw "No shelf entry $what."
+        }
         if (-not $map.ContainsKey($e.Name)) { throw "'$($e.Name)' has no save paths configured." }
 
         # Not $all: the script's own -All switch is [switch], and PowerShell variable
@@ -422,13 +621,6 @@ switch ($Command) {
         # parameter and throws "cannot convert to SwitchParameter".
         $allBackups = @(Get-GSSaveBackup -EntryName $e.Name -Store $storePath)
         $real = @($allBackups | Where-Object { -not $_.Safe })
-        if ($real.Count -eq 0) { throw "No backup found for '$($e.Name)'." }
-        $pick = $real[0]
-        if ($Backup) {
-            $pick = $null
-            foreach ($b in $real) { if ($b.Id -eq $Backup) { $pick = $b; break } }
-            if (-not $pick) { throw "Backup '$Backup' not found for '$($e.Name)'." }
-        }
         if ($real.Count -eq 0) { throw "No backup found for '$($e.Name)'." }
         $pick = $real[0]
         if ($Backup) {
@@ -453,6 +645,202 @@ switch ($Command) {
             -Store $storePath -BackupId $pick.Id
         Write-Ok ("{0} path(s) restored from {1}" -f $res.Restored, $res.From)
         if ($res.SafetyCopy) { Write-Info ("previous state kept at " + (Split-Path -Leaf $res.SafetyCopy)) }
+        Write-Host ''
+    }
+
+    'adopt' {
+        if (-not $Shelf) { throw 'adopt needs -Shelf' }
+        if (-not $All -and -not $Name -and -not $Target) { throw 'adopt needs -All, -Name or -Target' }
+        if ($Title -and -not $Name) { throw 'adopt -Title pins a single entry, so it needs -Name as well.' }
+
+        $ludExe = Get-GSLudusaviExe -Exe $LudusaviExe
+        if (-not $ludExe) {
+            throw 'Ludusavi not found. Install it, or point at it with -LudusaviExe <path to ludusavi.exe>.'
+        }
+
+        $shelfData = Get-GSShelf -Shelf $Shelf -SkipSize
+        $map = Import-GSSaveMap -Shelf $Shelf
+        $ludMap = Import-GSLudusaviMap -Shelf $Shelf
+
+        $items = @($shelfData.Items)
+        if ($Name -or $Target) {
+            $items = @(Select-GSShelfEntry -Items $shelfData.Items -Name $Name -Target $Target)
+            if ($items.Count -eq 0) {
+                $what = "named '$Name'"
+                if ($Target) { $what = "pointing at '$Target'" }
+                throw "No shelf entry $what."
+            }
+        }
+
+        # Pinning a title is recorded whether or not it leads to paths this time:
+        # it is the user telling us what the game is called, and that answer does
+        # not expire.
+        if ($Title) { $ludMap[$Name] = $Title }
+
+        $todo = @($items | Where-Object { -not $map.ContainsKey($_.Name) })
+        if ($todo.Count -eq 0) {
+            Write-Host ''
+            Write-Info 'Every selected entry is already mapped - the curated map wins, nothing to add.'
+            if ($Title) {
+                $n = Add-GSLudusaviMapEntry -Shelf $Shelf -Map $ludMap -WhatIf:$WhatIfPreference
+                if (-not $WhatIfPreference -and $n -gt 0) {
+                    Write-Ok ("recorded title: {0} -> {1}" -f $Name, $Title)
+                }
+            }
+            Write-Host ''
+            return
+        }
+
+        $info = Test-GSLudusavi -Exe $ludExe
+        $ludNote = $info.Note
+        if ($UpdateManifest -and -not $info.ManifestPath) {
+            $ludNote = 'no manifest cached; -UpdateManifest fetches it with the first query'
+        }
+        Write-Host ''
+        Write-Host '  GameShelf adopt - save locations Ludusavi knows' -ForegroundColor Cyan
+        Write-Host ("  ludusavi: " + $ludNote) -ForegroundColor DarkGray
+        Write-Host ''
+
+        $props = @(Get-GSLudusaviProposal -Entry $todo -Exe $ludExe -Titles $ludMap `
+                -MinScore $MinScore -AllowManifestUpdate:$UpdateManifest -Progress {
+                    param($who, $what)
+                    if ($who) { Write-Verbose "ludusavi: $who - $what" } elseif ($what) { Write-Verbose "ludusavi: $what" }
+                })
+
+        $adopted = @{}
+        foreach ($p in $props) {
+            Write-GSLudusaviProposal -Proposal $p -RawPaths
+            if ($p.Ok) { $adopted[$p.Entry] = $p.Paths }
+        }
+
+        $paths = 0
+        foreach ($k in $adopted.Keys) { $paths += @($adopted[$k]).Count }
+
+        Write-Host ''
+        if ($adopted.Count -eq 0) {
+            Write-Host '  Nothing to adopt.' -ForegroundColor Yellow
+            Write-Info ("-MinScore is {0:N2}; lower it to accept weaker name matches, or pin one with -Name <entry> -Title <title>." -f $MinScore)
+            Write-Host ''
+            return
+        }
+
+        if (-not $PSCmdlet.ShouldProcess($Shelf, "adopt $($adopted.Count) entr(ies), $paths path(s) into the save map")) {
+            Write-Host ''
+            return
+        }
+
+        $newEntries = Add-GSSaveMapEntry -Shelf $Shelf -Entry $adopted
+        $newTitles = Add-GSLudusaviMapEntry -Shelf $Shelf -Map $ludMap
+        Write-Ok ("{0} entr(ies), {1} path(s) added to the save map" -f $newEntries, $paths)
+        if ($newTitles -gt 0) { Write-Info ("title override(s) recorded: " + (Get-GSLudusaviMapPath -Shelf $Shelf)) }
+        Write-Info ("map   : " + (Get-GSSaveMapPath -Shelf $Shelf))
+        Write-Info 'Review it, then: backup -Shelf <folder> -All'
+        Write-Host ''
+    }
+
+    'playnite' {
+        if ($Install) {
+            $src = Join-Path $PSScriptRoot 'integrations\playnite\GameShelf'
+            if (-not (Test-Path -LiteralPath $src)) { throw "Bundled extension not found: $src" }
+            # Not $root: this script's own -Root parameter is [string[]], and
+            # PowerShell variable names are case-insensitive, so assigning to
+            # $root would silently retype that parameter and then fail to bind
+            # back into a [string] parameter further down. Same trap as the $all
+            # and $name locals noted below.
+            $extRoot = Get-GSPlayniteExtensionRoot -Root $PlayniteRoot
+            $res = Install-GSPlayniteExtension -Source $src -Root $extRoot -Force:$Force -WhatIf:$WhatIfPreference
+            if ($WhatIfPreference) { return }
+            Write-Host ''
+            Write-Ok ("extension '{0}' installed" -f $res.Id)
+            Write-Info ("{0} file(s) in {1}" -f $res.Files, $res.Path)
+            if ($env:APPDATA) {
+                $settings = Write-GSPlayniteSettingsTemplate -Cli (Join-Path $PSScriptRoot 'gameshelf.cmd')
+                Write-Info ("settings : " + $settings)
+            }
+            Write-Host ''
+            Write-Info 'Restart Playnite, then: Extensions > GameShelf > Export library'
+            Write-Host ''
+            return
+        }
+
+        $export = Get-GSPlayniteExportPath -File $File
+        if (-not $export -or -not (Test-Path -LiteralPath $export -PathType Leaf)) {
+            throw ("No Playnite export at '$export'. Run 'playnite -Install', start Playnite and use " +
+                "'Export library for GameShelf' from its main menu, or pass a copy with -File <json>.")
+        }
+
+        $lib = Import-GSPlayniteLibrary -Path $export
+        $stamp = ''
+        if ($lib.Generated) { $stamp = ' exported ' + $lib.Generated }
+        if ($lib.PlayniteVersion) { $stamp += ' (Playnite ' + $lib.PlayniteVersion + ')' }
+
+        Write-Host ''
+        Write-Host ("  Playnite library: {0} game(s)" -f $lib.Games.Count) -ForegroundColor Cyan
+        if ($stamp) { Write-Info $stamp.Trim() }
+
+        if ($Shelf) {
+            $m = Get-GSPlayniteMatch -Shelf $Shelf -Games $lib.Games
+            Write-Host ''
+            Write-Host ("  {0} of {1} shelf entries matched a Playnite game" -f $m.Matched, $m.Total) -ForegroundColor White
+
+            $loose = @($m.OnShelf | Where-Object { $_.Matched -and $_.MatchKind -eq 'name' })
+            foreach ($r in $loose) {
+                Write-Host ("    name match  {0} -> {1}" -f $r.Name, $r.Game.Name) -ForegroundColor DarkYellow
+            }
+            # Capped: on a shelf of 60 games against a library of 4, an uncapped
+            # list buries the two lines above it that anyone actually asked for.
+            $show = 15
+            $unmatched = @($m.OnShelf | Where-Object { -not $_.Matched })
+            if ($unmatched.Count -gt 0) {
+                Write-Host ''
+                Write-Host '  on the shelf, not in Playnite:' -ForegroundColor DarkYellow
+                foreach ($r in ($unmatched | Select-Object -First $show)) {
+                    Write-Host ("    " + $r.Name) -ForegroundColor DarkYellow
+                }
+                if ($unmatched.Count -gt $show) { Write-Info ("and $($unmatched.Count - $show) more") }
+            }
+            $absent = @($m.Unmatched | Where-Object { $_.IsInstalled })
+            if ($absent.Count -gt 0) {
+                Write-Host ''
+                Write-Host '  installed in Playnite, not on the shelf:' -ForegroundColor DarkYellow
+                foreach ($g in ($absent | Sort-Object Name | Select-Object -First $show)) {
+                    $hours = '{0:N1} h' -f ($g.PlaytimeSeconds / 3600.0)
+                    Write-Host ("    {0,-40} {1,8}" -f $g.Name, $hours) -ForegroundColor DarkYellow
+                }
+                if ($absent.Count -gt $show) { Write-Info ("and $($absent.Count - $show) more") }
+            }
+        }
+
+        if ($Out) {
+            $items = @(New-GSPlayniteManifest -Games $lib.Games -CategorySource $CategorySource `
+                    -OnlyInstalled:$OnlyInstalled -SkipLauncherManaged:$SkipLauncherManaged)
+            Write-Host ''
+            if ($items.Count -eq 0) {
+                Write-Warn2 'Nothing to write: every game was filtered out.'
+                Write-Info 'A game needs an install folder; -OnlyInstalled and -SkipLauncherManaged remove more.'
+                Write-Info ("This library has {0} game(s) in total." -f $lib.Games.Count)
+            } else {
+                Export-GSManifest -Path $Out -Items $items -Meta @{
+                    generated = (Get-Date -Format 's')
+                    source    = 'playnite'
+                    note      = 'Draft from the Playnite library. Set the category column to your own grouping, then run build.'
+                }
+                Write-Ok ("draft manifest written: {0}" -f $Out)
+                Write-Info ("{0} entries, categories from {1}" -f $items.Count, $CategorySource)
+                Write-Info 'Delete what you do not want on the shelf, then build -Manifest <file>.'
+            }
+        }
+
+        if (-not $Shelf -and -not $Out) {
+            Write-Host ''
+            $byCat = @(New-GSPlayniteManifest -Games $lib.Games -CategorySource $CategorySource -OnlyInstalled:$OnlyInstalled)
+            foreach ($group in ($byCat | Group-Object Category | Sort-Object Count -Descending | Select-Object -First 12)) {
+                Write-Host ("    {0,-28} {1,4}" -f $group.Name, $group.Count) -ForegroundColor Gray
+            }
+            Write-Host ''
+            Write-Info ("{0} of {1} games have an install folder" -f $byCat.Count, $lib.Games.Count)
+            Write-Info 'Next: -Out draft.txt to draft a manifest, or -Shelf <folder> to compare with a shelf.'
+        }
         Write-Host ''
     }
 }

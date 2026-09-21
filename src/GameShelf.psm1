@@ -24,6 +24,12 @@ $script:GSManifestName = '_shelf.txt'
 # so its functions share this module's scope (and its StrictMode).
 . (Join-Path $PSScriptRoot 'GameShelf.Saves.ps1')
 
+# Integrations with tools that know things GameShelf would otherwise guess at:
+# Ludusavi for save locations, Playnite for the library itself. Both are optional
+# at runtime - nothing here is required for a shelf to work.
+. (Join-Path $PSScriptRoot 'GameShelf.Ludusavi.ps1')
+. (Join-Path $PSScriptRoot 'GameShelf.Playnite.ps1')
+
 #region ---------------------------------------------------------------- manifest
 
 function Import-GSManifest {
@@ -103,6 +109,24 @@ function Get-GSProp {
     $p = $Object.PSObject.Properties[$Name]
     if ($null -eq $p -or $null -eq $p.Value) { return '' }
     return ([string]$p.Value).Trim()
+}
+
+function Get-GSJsonMember {
+    # Safe member read for objects that came out of ConvertFrom-Json.
+    # Get-GSProp flattens everything to a trimmed string, which is right for
+    # manifest columns and wrong here: a score of 0, a boolean false and a missing
+    # key have to stay distinguishable, and under StrictMode a missing one is an
+    # exception rather than $null. Covers PSCustomObject (the default) and
+    # dictionaries (-AsHashtable, PowerShell 7).
+    param($Object, [string]$Name)
+    if ($null -eq $Object) { return $null }
+    if ($Object -is [System.Collections.IDictionary]) {
+        if ($Object.Contains($Name)) { return $Object[$Name] }
+        return $null
+    }
+    $p = $Object.PSObject.Properties[$Name]
+    if ($null -eq $p) { return $null }
+    return $p.Value
 }
 
 function Export-GSManifest {
@@ -734,6 +758,41 @@ function Test-GSShelf {
     }
 }
 
+function Select-GSShelfEntry {
+    <#
+    .SYNOPSIS
+        Pick shelf entries out of a shelf listing by name or by target folder.
+    .DESCRIPTION
+        -Target exists so that a caller who only has the install folder can address
+        an entry. That is the normal case for a launcher: Playnite knows
+        'D:\SteamLibrary\steamapps\common\ELDEN RING', while the label on the shelf
+        ('艾尔登法环') is GameShelf's own and may have been renamed to anything.
+
+        Emits matching entries; wrap the call in @() to count them.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Items,
+        [string]$Name,
+        [string]$Target
+    )
+
+    if (-not $Name -and -not $Target) { return }
+
+    if ($Name) {
+        foreach ($i in @($Items | Where-Object { $_ })) {
+            if ($i.Name -eq $Name) { $i }
+        }
+        return
+    }
+
+    $want = $Target.TrimEnd('\')
+    foreach ($i in @($Items | Where-Object { $_ })) {
+        if (-not $i.Target) { continue }
+        if (([string]$i.Target).TrimEnd('\') -ieq $want) { $i }
+    }
+}
+
 function Export-GSIndex {
     <#
     .SYNOPSIS
@@ -1023,9 +1082,26 @@ Export-ModuleMember -Function @(
     'Get-GSFolderSize', 'Get-GSGameSignal', 'Invoke-GSScan',
     'New-GSShelf', 'Get-GSShelf', 'Test-GSShelf', 'Export-GSIndex',
     'Remove-GSShelf', 'Test-GSEnvironment', 'Test-GSIsElevated',
-    'Get-GSSaveMapPath', 'Import-GSSaveMap', 'Export-GSSaveMap',
+    'Get-GSSaveMapPath', 'Import-GSSaveMap', 'Export-GSSaveMap', 'Add-GSSaveMapEntry',
+    'Write-GSLineFile',
     'Resolve-GSSavePath', 'Get-GSSaveTarget', 'Get-GSFileStat',
     'Find-GSSaveCandidate', 'Get-GSSaveStore',
     'Backup-GSSave', 'Get-GSSaveBackup', 'Restore-GSSave',
-    'Import-GSLaunchMap', 'Get-GSLaunchExe'
+    'Import-GSLaunchMap', 'Get-GSLaunchExe', 'Select-GSShelfEntry',
+    # save-map path tools, shared by the Ludusavi bridge
+    'Get-GSRelativeTo', 'ConvertTo-GSSaveMapPath', 'Test-GSPathIsSpecific',
+    'Get-GSPathClusterRoot', 'Group-GSPathCluster',
+    # ludusavi bridge
+    'Get-GSLudusaviMapPath', 'Import-GSLudusaviMap', 'Export-GSLudusaviMap',
+    'Add-GSLudusaviMapEntry',
+    'Get-GSLudusaviExe', 'Get-GSLudusaviAppDir', 'Test-GSLudusavi',
+    'ConvertTo-GSProcessArgument', 'Invoke-GSLudusavi',
+    'ConvertFrom-GSLudusaviFind', 'ConvertFrom-GSLudusaviPreview', 'Get-GSLudusaviUnknown',
+    'Find-GSLudusaviTitle', 'Get-GSLudusaviPreview', 'ConvertTo-GSLudusaviProposal',
+    'Get-GSLudusaviProposal',
+    # playnite bridge
+    'Get-GSPlayniteExportPath', 'Import-GSPlayniteLibrary',
+    'Get-GSPlayniteExtensionRoot', 'Import-GSPlayniteExtensionManifest',
+    'Install-GSPlayniteExtension', 'ConvertTo-GSManifestField',
+    'New-GSPlayniteManifest', 'Get-GSPlayniteMatch'
 )

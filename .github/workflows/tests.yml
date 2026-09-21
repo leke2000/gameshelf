@@ -1,0 +1,30 @@
+name: tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    name: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show PowerShell version
+        shell: ${{ matrix.shell }}
+        run: $PSVersionTable.PSVersion
+
+      - name: Environment check
+        shell: ${{ matrix.shell }}
+        run: .\gameshelf.ps1 doctor
+
+      - name: Test suite
+        shell: ${{ matrix.shell }}
+        run: .\tests\run-tests.ps1

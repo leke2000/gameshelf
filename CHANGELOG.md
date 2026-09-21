@@ -4,6 +4,118 @@ All notable changes to GameShelf are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-09-21
+
+Two integrations, both optional at runtime. Nothing in either is needed for a shelf
+to work, and neither changes what an existing shelf does.
+
+### Added
+
+- **Ludusavi integration** ([github.com/mtkennerly/ludusavi](https://github.com/mtkennerly/ludusavi)),
+  which turns save-location guessing into data. `saves -Ludusavi` reports what
+  Ludusavi knows for entries that are not mapped yet; `adopt -All` (or `-Name`)
+  writes it into `_saves.txt`. Ludusavi is asked rather than its manifest parsed —
+  `ludusavi backup --preview --api` resolves placeholders, globs, store user ids
+  and registry keys exactly as a real backup would, and `--no-manifest-update` is
+  passed by default so a first run reports a missing manifest instead of quietly
+  fetching 17 MB.
+- `Group-GSPathCluster` collapses Ludusavi's per-file answer onto the smallest set
+  of folders covering it, and `ConvertTo-GSSaveMapPath` rewrites the result with
+  the tokens `_saves.txt` already uses. `Test-GSPathIsSpecific` is the guard that
+  stops two unrelated folders under `%APPDATA%` from merging into a bare
+  `%APPDATA%` entry, which would back up the whole roaming profile.
+- `_ludusavi.txt`, a `<shelf entry name>|<ludusavi title>` map, for shelves whose
+  labels are not the games' titles. Consulted before fuzzy matching; a match below
+  `-MinScore` (default 0.8) is reported but not adopted.
+- **Playnite integration** ([playnite.link](https://playnite.link)): a bundled
+  PowerShell script extension in `integrations/playnite/` exports the library to
+  `%APPDATA%\GameShelf\playnite-library.json`, and `playnite` reads it —
+  `-Out draft.txt` drafts a manifest with Playnite's own categories and playtime,
+  `-Shelf <folder>` reports shelf entries Playnite does not know and installed
+  games that are not on the shelf yet, `-Install` copies the extension into
+  Playnite. The extension also adds two game-menu entries that address the shelf by
+  install folder.
+- `-Target <folder>` on `saves`, `backup` and `restore`, plus `Select-GSShelfEntry`
+  behind it: an entry can be addressed by the folder it points at rather than by
+  its label, which is what a launcher has to hand. The Playnite game-menu actions
+  rely on it.
+- `doctor` reports both integrations. Absent is the normal case and is not counted
+  as a failure; only a `-LudusaviExe` the user named that does not exist is.
+- 26 tests (73 total): argument quoting for Windows, the JSON shapes the Ludusavi
+  CLI answers with, path clustering and its specificity guard, token rewriting,
+  the append-only map writers, the extension manifest agreeing with its own folder,
+  the Playnite export round-trip, and matching a shelf against a library by path
+  and by name. (75 after the two fixes below.)
+
+### Changed
+
+- **The launcher can be checked without eyes, further than before.** `-Diag` grew
+  from a grid-geometry dump into a layout audit: it measures whether each text block
+  actually fits (flagging silent clipping), computes WCAG AA contrast for every
+  label against the surface it is really drawn on — blending the backgrounds in
+  between, alpha included, and printing the layer chain for any failure — and
+  reports hit targets under 32px. New `-Shot <png>` renders the same composed window
+  to a file and exits, because geometry and ratios cannot tell you whether a
+  gradient is muddy or the spacing looks right. That is also how the two fixes below
+  were found, on a machine with no display.
+- **The launcher's hero says what it is doing.** With nothing played yet the banner
+  showed the first entry on the shelf under a `最近游玩` kicker, which claimed a
+  history that did not exist; it now says `开始游玩`. The button label follows the
+  click: `打开目录` for a collection or archive, `未设置启动程序` when the entry has
+  no executable yet — before, all three cases read `启动`. The status line reports
+  what is on screen (`搜索：3 个结果`) rather than the whole library next to a
+  heading that says something else, and tiles carry a hover tooltip with their note
+  and real folder.
+- `playnite -Shelf` caps each of its two lists at 15 entries with an "and N more"
+  line. On a 63-entry shelf against a 4-game library the uncapped list pushed the
+  matching summary off the screen, which is the part anyone asked for.
+
+### Fixed
+
+- **The launcher cut two `▶` glyphs.** Each measured a pixel wider than the box it
+  was given, with no trimming, so the right edge of the triangle was sliced off —
+  invisible until the audit started comparing required width against available
+  width. `MinWidth` gives them room, and the audit reports `clipped : 0`.
+- **Three launcher labels were below WCAG AA**: the status line at 3.76:1 and the
+  search hint at 3.23:1 against a required 4.5:1 for their size, plus a nav label.
+  Lightened until the audit says `all readable`.
+- The launcher wrote its single-instance pid file next to the script instead of in
+  `<shelf>\_ui`, where the README documents it and where `_recent.txt` and
+  `_layout.log` already live. Identical when installed into a shelf; running from a
+  checkout, two copies now find each other's marker instead of each writing its own.
+- **`adopt` rewrote a hand-curated save map's line endings.** `WriteAllLines`
+  writes CRLF, so appending one entry to an LF file turned a one-line change into a
+  sixty-line diff — observed on the first real shelf it ran against. The map
+  writers now keep the file's own newline style and BOM (`Write-GSLineFile`), and
+  `Export-GSSaveMap`-written files stay CRLF unchanged. Tested both ways.
+- **A resolved title the preview said nothing about was reported as "no such title
+  in its manifest"**, which was wrong in a way that mattered: Ludusavi omits a game
+  from `--preview` whenever it resolves no paths for it, and that is the ordinary
+  outcome for a game it cannot locate — an archive copy, a repack, a portable build
+  in an unexpected folder — or one whose manifest entry lists no files at all.
+  Checked against the real manifest to confirm that is what those entries look
+  like. The proposal now says "ludusavi resolved no paths for '<title>'", and a
+  title the preview explicitly calls unknown is reported separately.
+- `restore` carried its backup-selection block twice, verbatim. The second copy is
+  gone; behaviour is unchanged.
+- `playnite -Out` reported "no game has an install folder" when the real reason was
+  that every game had been filtered out, which is what `-SkipLauncherManaged` does
+  to a library that is all Steam and Epic. It now says so and names the filters.
+
+### Notes
+
+- Three PowerShell traps this hit, all now written down where they bit:
+  - `@($list)` **throws** "parameter type mismatch" when the list is a
+    `List[object]` — a `List[string]` is fine, which is exactly what makes it easy
+    to walk into. Use `.ToArray()`.
+  - a local named `$root` is the CLI's `[string[]]$Root` parameter, because
+    PowerShell variable names are case-insensitive. Assigning a string to it
+    retypes it, and it then refuses to bind back into a `[string]` parameter
+    further down. Same family as the `$all` and `$name` notes from 1.2.0.
+  - `[Parameter(Mandatory)][string[]]` **rejects an array containing an empty
+    string**, so rebinding a file's lines through such a parameter fails on any map
+    with a blank line in it. `[AllowEmptyString()]` is required.
+
 ## [1.2.0] - 2026-09-20
 
 ### Added

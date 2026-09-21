@@ -1,4 +1,4 @@
-<#
+﻿<#
     GameShelf save-data support.
 
     Dot-sourced by GameShelf.psm1, so these functions live in the module scope and
@@ -20,6 +20,23 @@
 $script:GSSaveMapName = '_saves.txt'
 $script:GSSaveStoreName = '_saves'
 $script:GSSaveManifestName = '_backup.txt'
+
+<#
+  The tokens a save-map path may contain, most specific first. Order is load
+  bearing in both directions: Resolve-GSSavePath replaces the first match it
+  finds, and ConvertTo-GSSaveMapPath walks this list to turn an absolute path
+  back into a token form. '%LOCALLOW%' must therefore come before
+  '%USERPROFILE%', which is also an ancestor of it, and '%DOCUMENTS%' before
+  '%USERPROFILE%' so a redirected (OneDrive) Documents still wins.
+#>
+$script:GSSaveTokens = @(
+    @('%DOCUMENTS%', [Environment]::GetFolderPath('MyDocuments')),
+    @('%SAVEDGAMES%', (Join-Path $env:USERPROFILE 'Saved Games')),
+    @('%LOCALLOW%', (Join-Path $env:USERPROFILE 'AppData\LocalLow')),
+    @('%APPDATA%', $env:APPDATA),
+    @('%LOCALAPPDATA%', $env:LOCALAPPDATA),
+    @('%USERPROFILE%', $env:USERPROFILE)
+)
 
 # Folder names that usually hold saves when they sit inside the game itself.
 $script:GSInGameSaveDirs = @(
@@ -90,6 +107,93 @@ function Export-GSSaveMap {
         (New-Object System.Text.UTF8Encoding($true)))
 }
 
+function Write-GSLineFile {
+    <#
+    .SYNOPSIS
+        Write lines back in the style the file already uses.
+    .DESCRIPTION
+        Line endings and the byte order mark belong to the file someone else
+        maintains, not to the tool appending to it. A shelf map curated in an editor
+        that writes LF, rewritten as CRLF, turns one appended entry into a
+        sixty-line diff; adding a BOM to a file that had none does the same to its
+        first line. Both were observed on a real shelf.
+
+        [AllowEmptyString] is load-bearing: a hand-maintained map can contain a
+        blank line, and without it Mandatory rejects the whole array with "cannot
+        bind ... because it is an empty string".
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines
+    )
+
+    $nl = "`r`n"
+    $encoding = New-Object System.Text.UTF8Encoding($true)
+
+    if (Test-Path -LiteralPath $Path) {
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        $hasBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+        if (-not $hasBom) { $encoding = New-Object System.Text.UTF8Encoding($false) }
+
+        $text = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
+        if ($text -notmatch "`r`n" -and $text -match "`n") { $nl = "`n" }
+    }
+
+    $body = (@($Lines) -join $nl) + $nl
+    [System.IO.File]::WriteAllText($Path, $body, $encoding)
+}
+
+function Add-GSSaveMapEntry {
+    <#
+    .SYNOPSIS
+        Append entries to a shelf's save map without rewriting what is there.
+    .DESCRIPTION
+        The save map is a file the user curates by hand - the README says so - so
+        the commands that learn new locations must not reformat it. Entries
+        already present are left alone: the curated path wins over anything a tool
+        proposes, and that only holds if adopting never touches an existing line.
+        Line endings and the BOM are the file's own; see Write-GSLineFile.
+
+        Returns the number of entries that were (or, under -WhatIf, would be)
+        appended.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory, Position = 0)][string]$Shelf,
+        [Parameter(Mandatory)][hashtable]$Entry
+    )
+
+    $existing = Import-GSSaveMap -Shelf $Shelf
+    $path = Get-GSSaveMapPath -Shelf $Shelf
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    if (Test-Path -LiteralPath $path) {
+        foreach ($l in [System.IO.File]::ReadAllLines($path, [System.Text.Encoding]::UTF8)) { $lines.Add($l) }
+    } else {
+        $lines.Add('# GameShelf save map.')
+        $lines.Add('# <shelf entry name>|<path>[;<path>...]')
+        $lines.Add('# %APPDATA% %LOCALAPPDATA% %USERPROFILE% %DOCUMENTS% %SAVEDGAMES% %LOCALLOW% expand.')
+        $lines.Add('# A leading GAME\ means "relative to that game''s own folder".')
+    }
+
+    $added = 0
+    foreach ($k in ($Entry.Keys | Sort-Object)) {
+        if ($existing.ContainsKey($k)) { continue }
+        $paths = @($Entry[$k] | Where-Object { $_ })
+        if ($paths.Count -eq 0) { continue }
+        $lines.Add($k + '|' + ($paths -join ';'))
+        $added++
+    }
+
+    if ($added -gt 0) {
+        if ($PSCmdlet.ShouldProcess($path, "append $added save-map entr(ies)")) {
+            Write-GSLineFile -Path $path -Lines $lines.ToArray()
+        }
+    }
+    return $added
+}
+
 function Resolve-GSSavePath {
     <#
     .SYNOPSIS
@@ -109,15 +213,7 @@ function Resolve-GSSavePath {
 
     if ($p -match '^GAME\\') { return (Join-Path $Target $p.Substring(5)) }
 
-    $tokens = @(
-        @('%DOCUMENTS%', [Environment]::GetFolderPath('MyDocuments')),
-        @('%SAVEDGAMES%', (Join-Path $env:USERPROFILE 'Saved Games')),
-        @('%LOCALLOW%', (Join-Path $env:USERPROFILE 'AppData\LocalLow')),
-        @('%APPDATA%', $env:APPDATA),
-        @('%LOCALAPPDATA%', $env:LOCALAPPDATA),
-        @('%USERPROFILE%', $env:USERPROFILE)
-    )
-    foreach ($pair in $tokens) {
+    foreach ($pair in $script:GSSaveTokens) {
         # Escape the pattern but NOT the replacement. [regex]::Escape on a Windows
         # path doubles its backslashes, and a doubled backslash is inserted
         # literally, producing C:\\Users\\... Only '$' is special in a replacement.
@@ -127,6 +223,220 @@ function Resolve-GSSavePath {
 
     if (-not [System.IO.Path]::IsPathRooted($p)) { return (Join-Path $Target $p) }
     return $p
+}
+
+function Get-GSRelativeTo {
+    <#
+    .SYNOPSIS
+        The path of Child relative to Ancestor, '' when they are equal, or $null
+        when Child is not inside Ancestor at all.
+    .DESCRIPTION
+        Comparison is case-insensitive and boundary-aware: 'C:\ab' is not
+        considered to be inside 'C:\a'.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Child,
+        [Parameter(Mandatory)][string]$Ancestor
+    )
+
+    $c = $Child.TrimEnd('\')
+    $a = $Ancestor.TrimEnd('\')
+    if ($a -eq '') { return $null }
+    if ($c -ieq $a) { return '' }
+    if ($c.StartsWith($a + '\', [System.StringComparison]::InvariantCultureIgnoreCase)) {
+        return $c.Substring($a.Length + 1)
+    }
+    return $null
+}
+
+function ConvertTo-GSSaveMapPath {
+    <#
+    .SYNOPSIS
+        Turn an absolute save path into the token form a save map prefers.
+    .DESCRIPTION
+        The inverse of Resolve-GSSavePath, and it exists for the same reason: a
+        map that reads '%APPDATA%\Team Cherry\Hollow Knight' keeps working when
+        the user profile moves or the shelf is copied to another machine, while
+        'C:\Users\bob\AppData\...' does not.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, Position = 0)][string]$Absolute,
+        [string]$Target
+    )
+
+    $abs = $Absolute.TrimEnd('\')
+
+    if ($Target) {
+        $rel = Get-GSRelativeTo -Child $abs -Ancestor $Target
+        if ($null -ne $rel) {
+            if ($rel -eq '') { return 'GAME\' }
+            return ('GAME\' + $rel)
+        }
+    }
+
+    foreach ($pair in $script:GSSaveTokens) {
+        if (-not $pair[1]) { continue }
+        $rel = Get-GSRelativeTo -Child $abs -Ancestor ([string]$pair[1])
+        if ($null -ne $rel) {
+            if ($rel -eq '') { return $pair[0] }
+            return ($pair[0] + '\' + $rel)
+        }
+    }
+
+    return $abs
+}
+
+function Test-GSPathIsSpecific {
+    <#
+    .SYNOPSIS
+        Whether a folder is specific enough to be recorded as a save location.
+    .DESCRIPTION
+        This is the guard that keeps path clustering honest. Two saves that live
+        in unrelated subfolders of %APPDATA% share that whole folder as their
+        common prefix, and a map entry of bare '%APPDATA%' would back up the
+        entire roaming profile. So a candidate must sit strictly below a token
+        root, strictly below the game's own folder, or below a drive root - being
+        equal to any of those is not enough.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, Position = 0)][string]$Path,
+        [string]$Target
+    )
+
+    $p = $Path.TrimEnd('\')
+
+    if ($Target) {
+        $rel = Get-GSRelativeTo -Child $p -Ancestor $Target
+        if ($null -ne $rel -and $rel -ne '') { return $true }
+    }
+
+    foreach ($pair in $script:GSSaveTokens) {
+        if (-not $pair[1]) { continue }
+        $rel = Get-GSRelativeTo -Child $p -Ancestor ([string]$pair[1])
+        if ($null -ne $rel) { return ($rel -ne '') }
+    }
+
+    if ($p -match '^[A-Za-z]:\\?$') { return $false }
+    if ($p -match '^[A-Za-z]:$') { return $false }
+    return $true
+}
+
+function Get-GSPathClusterRoot {
+    <#
+    .SYNOPSIS
+        The deepest folder on the common path of two entries.
+    .DESCRIPTION
+        When one entry is an ancestor of the other it is returned unchanged, so a
+        folder key that already covers a file key survives. Otherwise the two are
+        compared character by character and the result is cut back to the last
+        separator, which is what makes sibling files collapse onto their folder.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$A,
+        [Parameter(Mandatory)][string]$B
+    )
+
+    $x = $A.TrimEnd('\')
+    $y = $B.TrimEnd('\')
+
+    if ($x -ieq $y) { return $x }
+    if ($null -ne (Get-GSRelativeTo -Child $y -Ancestor $x)) { return $x }
+    if ($null -ne (Get-GSRelativeTo -Child $x -Ancestor $y)) { return $y }
+
+    $min = [Math]::Min($x.Length, $y.Length)
+    $i = 0
+    while ($i -lt $min) {
+        if ([char]::ToLowerInvariant($x[$i]) -ne [char]::ToLowerInvariant($y[$i])) { break }
+        $i++
+    }
+    $cut = $x.Substring(0, $i)
+    $sep = $cut.LastIndexOf('\')
+    if ($sep -lt 0) { return '' }
+    $dir = $cut.Substring(0, $sep)
+    if ($dir -match '^[A-Za-z]:$') { return ($dir + '\') }
+    return $dir
+}
+
+function Group-GSPathCluster {
+    <#
+    .SYNOPSIS
+        Collapse a flat list of paths into the smallest set of folders covering
+        them all.
+    .DESCRIPTION
+        Ludusavi reports one entry per file, which is the wrong shape for a save
+        map: a game with 900 save slots would become 900 lines. Entries are
+        sorted first, so everything under one folder is adjacent, then merged
+        greedily as long as the merged root stays specific (Test-GSPathIsSpecific)
+        and still covers the group.
+
+        Emits one object per cluster: Root, Keys (how many reported paths it
+        covers) and Bytes (summed from the optional -Bytes table, keyed by the
+        same paths, when the caller has sizes to hand).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Paths,
+        [string]$Target,
+        [hashtable]$Bytes
+    )
+
+    $keys = New-Object System.Collections.Generic.List[string]
+    $seen = @{}
+    foreach ($p in $Paths) {
+        if (-not $p) { continue }
+        $k = ($p.Trim() -replace '/', '\').TrimEnd('\')
+        if ($k.Length -lt 2) { continue }
+        $lk = $k.ToLowerInvariant()
+        if ($seen.ContainsKey($lk)) { continue }
+        $seen[$lk] = $true
+        $keys.Add($k)
+    }
+    if ($keys.Count -eq 0) { return }
+
+    # Byte totals arrive keyed by whatever casing the caller used; normalise here
+    # so cluster accounting cannot silently miss.
+    $sizes = @{}
+    if ($Bytes) {
+        foreach ($bk in $Bytes.Keys) {
+            if ($null -eq $Bytes[$bk]) { continue }
+            $sizes[([string]$bk).ToLowerInvariant()] = [long]$Bytes[$bk]
+        }
+    }
+
+    $sorted = @($keys | Sort-Object)
+
+    $root = $sorted[0]
+    $count = 1
+    $sum = [long]0
+    if ($sizes.ContainsKey($sorted[0].ToLowerInvariant())) { $sum = [long]$sizes[$sorted[0].ToLowerInvariant()] }
+    for ($i = 1; $i -lt $sorted.Count; $i++) {
+        $p = $sorted[$i]
+        $candidate = Get-GSPathClusterRoot -A $root -B $p
+        $merge = $false
+        if ($candidate) {
+            if ((Test-GSPathIsSpecific -Path $candidate -Target $Target) -and
+                ($null -ne (Get-GSRelativeTo -Child $root -Ancestor $candidate)) -and
+                ($null -ne (Get-GSRelativeTo -Child $p -Ancestor $candidate))) {
+                $merge = $true
+            }
+        }
+        if ($merge) {
+            $root = $candidate
+            $count++
+            if ($sizes.ContainsKey($p.ToLowerInvariant())) { $sum += [long]$sizes[$p.ToLowerInvariant()] }
+        } else {
+            [pscustomobject]@{ Root = $root; Keys = $count; Bytes = $sum }
+            $root = $p
+            $count = 1
+            $sum = [long]0
+            if ($sizes.ContainsKey($p.ToLowerInvariant())) { $sum = [long]$sizes[$p.ToLowerInvariant()] }
+        }
+    }
+    [pscustomobject]@{ Root = $root; Keys = $count; Bytes = $sum }
 }
 
 function Get-GSSaveTarget {

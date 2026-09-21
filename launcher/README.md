@@ -56,8 +56,9 @@ shelf by walking up from its own folder.
 | Action | What happens |
 |---|---|
 | Double-click a tile | Starts the game |
-| Hero **启动** button | Starts the most recently played game |
-| Type in the search box | Filters every entry by name, original name and category |
+| Hero button | Starts the most recently played game; before anything has been played it shows the first entry on the shelf, and the kicker says so (`开始游玩` instead of `最近游玩`). The label follows what the click will do: `启动`, `打开目录` for a collection or archive, `未设置启动程序` when the entry has no executable yet |
+| Hover a tile | Shows the entry's note and its real folder, which is what the context menu copies |
+| Type in the search box | Filters every entry by name, original name and category; the status line switches to the result count |
 | Click a nav rail entry | Shows just that category |
 | Right-click a tile | Open folder · copy real path · **set launcher** · switch to open-folder |
 | Click the shortcut while it is open | Restores and focuses the existing window instead of opening a second one |
@@ -123,16 +124,55 @@ unfamiliar names still reads as 60-odd distinct things.
 `-Sakura` overlays drifting petals if you want the pastel look; the default is
 monochrome.
 
-`-Diag` builds the window, writes the measured grid geometry to
-`<shelf>\_ui\_layout.log` and exits without showing anything — useful for checking
-a layout change on a machine you cannot see:
+## Checking a UI change without eyes
+
+Two switches build the whole window off-screen and report on it, so a layout or
+colour change can be argued about with numbers instead of taste — and reviewed on a
+machine with no display.
+
+`-Diag` writes `<shelf>\_ui\_layout.log` and exits. It reports the grid geometry
+(which confirms tiles really wrap into rows instead of forming one long horizontal
+strip), then audits the text:
 
 ```
 window            : 1,440 x 900
 scroll viewport   : 1,337 wide
 horizontal scroll : Collapsed
+top-level blocks  : 25
   grid: 25 tiles   7 columns   4 rows   panel 1,301 x 844
+
+hero              : Akujo no Eikan
+  kicker / action : 最近游玩 / 启动
+
+text blocks       : 326
+  ellipsised      : 4   (by design, TextTrimming is set)
+  clipped         : 0   (no room and no trimming - text is cut)
+
+contrast (WCAG AA: 4.5 body, 3.0 large)
+  all readable
+
+hit targets < 32px : 0
 ```
+
+- **clipped** is text that needs more width than it was given and has no
+  `TextTrimming`, so it is silently cut. It found two glyphs sitting one pixel
+  inside their border.
+- **contrast** is WCAG AA against the surface each label is really drawn on: the
+  backgrounds between the text and the window are blended, alpha included, and each
+  failing line prints the layer chain it measured so the number can be checked. It
+  found three dim greys on near-black (3.2:1 to 4.0:1 against a required 4.5:1).
+  Text over a gradient reports against the window colour instead of the gradient, so
+  those readings are optimistic — the audit under-reports rather than crying wolf.
+
+`-Shot` renders the same window to a PNG and exits:
+
+```powershell
+.\GameLauncher.ps1 -ShelfPath H:\Games -Shot H:\Games\_ui\shelf.png
+```
+
+Geometry and ratios cannot tell you whether a gradient is muddy or the spacing looks
+right. This is the same window, drawn into a file, so it can be looked at, sent to
+someone, or diffed against the previous one after a change.
 
 ## One Windows gotcha worth recording
 
