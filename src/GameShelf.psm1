@@ -1449,7 +1449,18 @@ function Invoke-GSShelfCommit {
 
     if (-not $PSCmdlet.ShouldProcess($Shelf, "Commit $($changed.Count) file(s)")) { return $result }
     $c = Invoke-GSShelfGit -Shelf $Shelf -Arguments @('commit', '-m', $Message)
-    if ($c.ExitCode -ne 0) { throw "git commit failed: $($c.Output -join ' ')" }
+    if ($c.ExitCode -ne 0) {
+        $detail = ($c.Output -join ' ')
+        # The first commit on a machine that has never set a git identity fails with
+        # "Author identity unknown", which is a configuration step rather than an
+        # error in the shelf - say which command fixes it.
+        if ($detail -match 'identity|who you are') {
+            throw ("git will not commit until it knows who you are. Set it once for this repository:`n" +
+                "  git -C `"$Shelf`" config user.name  `"Your Name`"`n" +
+                "  git -C `"$Shelf`" config user.email `"you@example.com`"")
+        }
+        throw "git commit failed: $detail"
+    }
     $result.Committed = $true
     $result.Message = ($c.Output | Select-Object -First 1)
     if (-not $Push) { return $result }

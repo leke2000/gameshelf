@@ -1181,6 +1181,38 @@ Test-Case 'committing outside a repository explains how to start one' {
     Assert-True ($msg -like '*git*init*') "the message should name the commands, got: $msg"
 }
 
+Test-Case 'a repository without a git identity says how to fix it' {
+    if (-not (Get-Command git -CommandType Application -ErrorAction SilentlyContinue)) {
+        Write-Host '        (git not available, skipped)' -ForegroundColor DarkGray
+    } else {
+        $tmp = Join-Path $sandbox 'noidentity'
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        "Action|X|Q:\x|" | Set-Content -LiteralPath (Join-Path $tmp '_shelf.txt') -Encoding UTF8
+        & git -C $tmp init -b main 2>&1 | Out-Null
+
+        # Hide every identity git could find, the way a fresh machine has none.
+        $blank = Join-Path $sandbox 'blank.gitconfig'
+        Set-Content -LiteralPath $blank -Value '' -Encoding ASCII
+        $savedGlobal = $env:GIT_CONFIG_GLOBAL
+        $savedSystem = $env:GIT_CONFIG_SYSTEM
+        try {
+            $env:GIT_CONFIG_GLOBAL = $blank
+            $env:GIT_CONFIG_SYSTEM = $blank
+            & git -C $tmp config --local --unset user.email 2>&1 | Out-Null
+            & git -C $tmp config --local --unset user.name 2>&1 | Out-Null
+
+            $threw = $false
+            $msg = ''
+            try { Invoke-GSShelfCommit -Shelf $tmp -Message 'x' } catch { $threw = $true; $msg = $_.Exception.Message }
+            Assert-True $threw 'the commit cannot succeed without an identity'
+            Assert-True ($msg -like '*user.name*' -and $msg -like '*user.email*') "the message should name the commands, got: $msg"
+        } finally {
+            $env:GIT_CONFIG_GLOBAL = $savedGlobal
+            $env:GIT_CONFIG_SYSTEM = $savedSystem
+        }
+    }
+}
+
 Test-Case 'scheduling sync is a described command, not a surprise' {
     if (-not (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue)) {
         Write-Host '        (ScheduledTasks module not available, skipped)' -ForegroundColor DarkGray

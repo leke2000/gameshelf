@@ -68,6 +68,9 @@ One shelf, several machines, and games that add themselves.
   right next to it said should stay local: committing it would hand the second
   machine the first machine's drive letters, silently. Caught while publishing a
   real shelf to a repository, where it would have been committed.
+- `sync -Commit` on a machine that has never set a git identity failed with git's
+  raw "Author identity unknown". It now says which two commands to run, once, for
+  that repository — the first thing anyone publishing a shelf hits.
 - **`New-GSShelf`'s `-Items` never worked**: it assigned to a local `$items`, which
   is the `-Items` parameter as far as PowerShell is concerned (variable names are
   case-insensitive), so the guard at the top read a variable it had just set to
